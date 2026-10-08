@@ -113,7 +113,7 @@ public class TransportTests : IDisposable
 		{
 			silentServer.Stop();
 			if (acceptTask.Status == TaskStatus.RanToCompletion)
-				acceptTask.Result.Dispose();
+				(await acceptTask).Dispose();
 		}
 	}
 
