@@ -40,9 +40,6 @@ public class HttpsServerTransport : IServerTransport
 	{
 		var builder = WebApplication.CreateBuilder();
 
-		builder.Configuration.AddInMemoryCollection(new Dictionary<string, string>());
-		builder.Host.ConfigureHostConfiguration(c => { });
-		builder.Host.ConfigureAppConfiguration(c => { });
 		builder.WebHost.ConfigureKestrel(kestrel =>
 		{
 			kestrel.ConfigureHttpsDefaults(https =>

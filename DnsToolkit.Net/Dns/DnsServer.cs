@@ -154,8 +154,9 @@ namespace DnsToolkit.Net.Dns
 				{
 					connection = await transport.AcceptConnectionAsync(token);
 				}
-				catch (OperationCanceledException) when (token.IsCancellationRequested)
+				catch (Exception) when (token.IsCancellationRequested)
 				{
+					// the server is stopping, the transport may fail as it is closed
 					connectionSlots.Release();
 					break;
 				}
@@ -169,17 +170,15 @@ namespace DnsToolkit.Net.Dns
 				{
 					connectionSlots.Release();
 
-					// A transport which fails permanently returns immediately, so slow down to avoid a busy loop
-					if (++failedAcceptCount >= MAX_FAILED_ACCEPTS_WITHOUT_DELAY)
+					// The transports handle errors of single clients themselves, so this is a failure of the transport itself.
+					// A transport which fails permanently fails immediately again, so wait longer after each failure.
+					try
 					{
-						try
-						{
-							await Task.Delay(FAILED_ACCEPT_DELAY_MS, token);
-						}
-						catch (OperationCanceledException)
-						{
-							break;
-						}
+						await Task.Delay(GetFailedAcceptDelay(++failedAcceptCount), token);
+					}
+					catch (OperationCanceledException)
+					{
+						break;
 					}
 
 					continue;
@@ -192,8 +191,21 @@ namespace DnsToolkit.Net.Dns
 			}
 		}
 
-		private const int MAX_FAILED_ACCEPTS_WITHOUT_DELAY = 100;
-		private const int FAILED_ACCEPT_DELAY_MS = 10;
+		private static readonly TimeSpan _maxFailedAcceptDelay = TimeSpan.FromMilliseconds(100);
+
+		/// <summary>
+		///   The delay after consecutive failed accepts: none after the first failure, then 1 ms doubled with each failure,
+		///   up to 100 ms. A single failure costs nothing, a transport which fails permanently is retried ten times a second.
+		/// </summary>
+		internal static TimeSpan GetFailedAcceptDelay(int failedAcceptCount)
+		{
+			if (failedAcceptCount <= 1)
+				return TimeSpan.Zero;
+
+			// 2^(count - 2) ms, the exponent is limited to avoid an overflow
+			var delay = TimeSpan.FromMilliseconds(1 << Math.Min(failedAcceptCount - 2, 16));
+			return delay < _maxFailedAcceptDelay ? delay : _maxFailedAcceptDelay;
+		}
 
 		private class RefCountDispose
 		{

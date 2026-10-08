@@ -89,7 +89,9 @@ public static class EndpointRouteBuilderExtensions
 
 		if (ctx.Request.Method == HttpMethod.Get.Method)
 		{
-			if (!ctx.Request.Query.TryGetValue("dns", out var queryValues) || queryValues.Count != 1)
+			var queryText = ctx.Request.Query.TryGetValue("dns", out var queryValues) && queryValues.Count == 1 ? queryValues[0] : null;
+
+			if (String.IsNullOrEmpty(queryText))
 			{
 				await Results.BadRequest().ExecuteAsync(ctx);
 				return;
@@ -97,8 +99,6 @@ public static class EndpointRouteBuilderExtensions
 
 			try
 			{
-				var queryText = queryValues[0];
-
 				var requiredPadding = (4 - queryText.Length % 4) % 4;
 
 				content = (queryText + new string('=', requiredPadding)).FromBase64UrlString(2);

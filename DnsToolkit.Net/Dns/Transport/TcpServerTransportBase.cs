@@ -91,20 +91,41 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 	///   Waits for a new connection and return the connection
 	/// </summary>
 	/// <param name="token"> The token to monitor cancellation requests </param>
-	/// <returns>A new connection to a client or null, if no connection could not be established</returns>
+	/// <returns>A new connection to a client, or null if the token was cancelled</returns>
+	/// <exception cref="SocketException">The listener failed, e.g. because it was stopped</exception>
 	public async Task<IServerConnection?> AcceptConnectionAsync(CancellationToken token = default)
 	{
-		try
+		// Errors which only concern a single client, e.g. a client which disconnected again before it was accepted,
+		// are handled here by accepting the next client, so the server only sees errors of the listener itself
+		while (true)
 		{
-			var client = await _tcpListener.AcceptTcpClientAsync(token);
-			client.SendTimeout = Timeout;
-			client.ReceiveTimeout = Timeout;
+			TcpClient client;
 
-			return CreateConnection(client, token);
-		}
-		catch
-		{
-			return null;
+			try
+			{
+				client = await _tcpListener.AcceptTcpClientAsync(token);
+			}
+			catch (SocketException ex) when (ex.SocketErrorCode is SocketError.ConnectionReset or SocketError.ConnectionAborted)
+			{
+				continue;
+			}
+			catch (OperationCanceledException) when (token.IsCancellationRequested)
+			{
+				return null;
+			}
+
+			try
+			{
+				client.SendTimeout = Timeout;
+				client.ReceiveTimeout = Timeout;
+
+				return CreateConnection(client, token);
+			}
+			catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
+			{
+				// the client disconnected meanwhile
+				client.Dispose();
+			}
 		}
 	}
 

@@ -53,6 +53,73 @@ public class DnsServerTests
 		Assert.InRange(transport.AcceptCalls, 1, 1000);
 	}
 
+	[Theory]
+	[InlineData(1, 0)]
+	[InlineData(2, 1)]
+	[InlineData(3, 2)]
+	[InlineData(8, 64)]
+	[InlineData(9, 100)]
+	[InlineData(1000, 100)]
+	public void FailedAcceptDelay_GrowsExponentiallyUpTo100Ms(int failedAccepts, int expectedMilliseconds)
+	{
+		Assert.Equal(TimeSpan.FromMilliseconds(expectedMilliseconds), DnsServer.GetFailedAcceptDelay(failedAccepts));
+	}
+
+	[Fact]
+	public async Task Server_RecoversImmediately_AfterSomeFailedAccepts()
+	{
+		var connection = new FakeServerConnection(CreateQueryPackage());
+		var transport = new FakeServerTransport(connection, failedAcceptsBeforeConnection: 5);
+
+		using var server = new DnsServer(transport);
+		server.QueryReceived += AnswerQuery;
+
+		var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+		server.Start();
+
+		// the delays after 5 failures add up to 15 ms
+		Assert.True(await connection.WaitForDisposeAsync(TimeSpan.FromSeconds(5)), "The connection after the failed accepts was not processed");
+		Assert.InRange(stopwatch.Elapsed, TimeSpan.Zero, TimeSpan.FromSeconds(1));
+		Assert.Equal(1, connection.SentPackages);
+	}
+
+	[Fact]
+	public async Task Server_RetriesPermanentlyFailingTransport_OnlyAboutTenTimesASecond()
+	{
+		var transport = new FakeServerTransport(alwaysReturnNull: true);
+
+		var server = new DnsServer(transport);
+		server.Start();
+		await Task.Delay(TimeSpan.FromSeconds(1));
+		((IDisposable) server).Dispose();
+
+		// about 8 retries with growing delays up to 100 ms and then about 9 retries per remaining second
+		Assert.InRange(transport.AcceptCalls, 5, 40);
+	}
+
+	[Fact]
+	public async Task Stop_ReportsNoExceptions_OfTheClosedTransports()
+	{
+		var exceptions = new List<Exception>();
+		var server = new DnsServer(
+			new UdpServerTransport(new IPEndPoint(IPAddress.Loopback, 0)),
+			new TcpServerTransport(new IPEndPoint(IPAddress.Loopback, 0)));
+		server.ExceptionThrown += (_, e) =>
+		{
+			lock (exceptions)
+				exceptions.Add(e.Exception);
+			return Task.CompletedTask;
+		};
+
+		server.Start();
+		await Task.Delay(200);
+		server.Stop();
+		await Task.Delay(200);
+
+		lock (exceptions)
+			Assert.Empty(exceptions);
+	}
+
 	[Fact]
 	public void Dispose_WithoutStart_DoesNotThrow()
 	{
@@ -108,11 +175,14 @@ public class DnsServerTests
 		private bool _connectionDelivered;
 		private int _acceptCalls;
 
-		public FakeServerTransport(FakeServerConnection? connection = null, bool alwaysReturnNull = false, bool throwOnFirstAccept = false)
+		private int _remainingFailedAccepts;
+
+		public FakeServerTransport(FakeServerConnection? connection = null, bool alwaysReturnNull = false, bool throwOnFirstAccept = false, int failedAcceptsBeforeConnection = 0)
 		{
 			_connection = connection;
 			_alwaysReturnNull = alwaysReturnNull;
 			_throwOnNextAccept = throwOnFirstAccept;
+			_remainingFailedAccepts = failedAcceptsBeforeConnection;
 		}
 
 		public int AcceptCalls => Volatile.Read(ref _acceptCalls);
@@ -132,6 +202,12 @@ public class DnsServerTests
 
 			if (_alwaysReturnNull)
 				return null;
+
+			if (_remainingFailedAccepts > 0)
+			{
+				_remainingFailedAccepts--;
+				return null;
+			}
 
 			if (_throwOnNextAccept)
 			{

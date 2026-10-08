@@ -18,6 +18,7 @@
 
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 
 namespace DnsToolkit.Net.Dns;
 
@@ -75,6 +76,33 @@ public class UdpServerTransport : IServerTransport
 		_socket = new Socket(endpoint.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
 		if (endpoint.Address.Equals(IPAddress.IPv6Any))
 			_socket.DualMode = true;
+
+		_anyEndPoint = new IPEndPoint(endpoint.AddressFamily == AddressFamily.InterNetwork ? IPAddress.Any : IPAddress.IPv6Any, 0);
+
+		DisableConnectionResetReporting(_socket);
+	}
+
+	private readonly IPEndPoint _anyEndPoint;
+
+	/// <summary>
+	///   On Windows an ICMP port unreachable for a sent response, e.g. because the client already closed its socket,
+	///   fails the next receive of the socket. For a server socket shared by all clients this must be disabled.
+	/// </summary>
+	private static void DisableConnectionResetReporting(Socket socket)
+	{
+		if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+			return;
+
+		const int SIO_UDP_CONNRESET = -1744830452;
+
+		try
+		{
+			socket.IOControl(SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
+		}
+		catch (SocketException)
+		{
+			// not supported, the error is also handled on receive
+		}
 	}
 
 	/// <summary>
@@ -97,29 +125,60 @@ public class UdpServerTransport : IServerTransport
 	///   Waits for a new connection and return the connection
 	/// </summary>
 	/// <param name="token"> The token to monitor cancellation requests </param>
-	/// <returns>A new connection to a client or null, if no connection could not be established</returns>
+	/// <returns>A new connection to a client, or null if the token was cancelled</returns>
+	/// <exception cref="SocketException">The socket failed, e.g. because it was closed</exception>
 	public async Task<IServerConnection?> AcceptConnectionAsync(CancellationToken token = default)
 	{
-		try
+		// Errors which only concern a single datagram are handled here by receiving the next one,
+		// so the server only sees errors of the socket itself
+		while (true)
 		{
-			var buffer = new byte[DefaultAllowedResponseSize + DnsRawPackage.LENGTH_HEADER_LENGTH];
-			var udpMessage = await _socket.ReceiveMessageFromAsync(
-				new ArraySegment<byte>(buffer, DnsRawPackage.LENGTH_HEADER_LENGTH, buffer.Length - DnsRawPackage.LENGTH_HEADER_LENGTH),
-				SocketFlags.None,
-				new IPEndPoint(_endpoint.AddressFamily == AddressFamily.InterNetwork ? IPAddress.Any : IPAddress.IPv6Any, 0), token);
+			var buffer = UdpReceiveBuffer.Rent();
+			Task<SocketReceiveMessageFromResult>? receiveTask = null;
 
-			DnsMessageBase.EncodeUShort(buffer, 0, (ushort) udpMessage.ReceivedBytes);
+			try
+			{
+#if NETSTANDARD2_0
+				// this receive cannot be cancelled, so only the waiting is cancelled
+				receiveTask = _socket.ReceiveMessageFromAsync(UdpReceiveBuffer.GetReceiveSegment(buffer), SocketFlags.None, _anyEndPoint);
+				var result = await receiveTask.WaitAsync(token);
+#else
+				receiveTask = _socket.ReceiveMessageFromAsync(UdpReceiveBuffer.GetReceiveSegment(buffer), SocketFlags.None, _anyEndPoint, token).AsTask();
+				var result = await receiveTask;
+#endif
 
-			return new UdpServerConnection(
-				this,
-				new DnsReceivedRawPackage(buffer, (IPEndPoint) udpMessage.RemoteEndPoint, _endpoint),
-				_socket,
-				_timeout);
+				return new UdpServerConnection(
+					this,
+					new DnsReceivedRawPackage(UdpReceiveBuffer.CopyMessage(buffer, result.ReceivedBytes), (IPEndPoint) result.RemoteEndPoint, _endpoint),
+					_socket,
+					_timeout);
+			}
+			catch (SocketException ex) when (IsDatagramError(ex.SocketErrorCode))
+			{
+				// receive the next datagram
+			}
+			catch (OperationCanceledException) when (token.IsCancellationRequested)
+			{
+				return null;
+			}
+			finally
+			{
+				// a receive which is still pending may write into the buffer, so it is only returned if the receive is done
+				UdpReceiveBuffer.Return(buffer, receiveTask);
+			}
 		}
-		catch
-		{
-			return null;
-		}
+	}
+
+	/// <summary>
+	///   Errors of a single datagram, e.g. an ICMP message for a previously sent response or a datagram larger than the buffer
+	/// </summary>
+	private static bool IsDatagramError(SocketError error)
+	{
+		return error is SocketError.ConnectionReset
+			or SocketError.MessageSize
+			or SocketError.NetworkReset
+			or SocketError.HostUnreachable
+			or SocketError.NetworkUnreachable;
 	}
 
 	public void Dispose()
