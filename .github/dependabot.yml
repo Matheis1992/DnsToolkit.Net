@@ -3,6 +3,7 @@ updates:
   # NuGet packages of the library and the test project
   - package-ecosystem: "nuget"
     directory: "/"
+    target-branch: "develop"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
@@ -16,5 +17,6 @@ updates:
   # versions of the actions used in .github/workflows
   - package-ecosystem: "github-actions"
     directory: "/"
+    target-branch: "develop"
     schedule:
       interval: "weekly"
