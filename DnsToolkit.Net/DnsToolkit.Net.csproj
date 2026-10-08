@@ -65,8 +65,6 @@
     <NoWarn>1701;1702;1591</NoWarn>
     <!-- The netstandard2.0 BCL is not annotated for nullable reference types, which results in false positives -->
     <NoWarn Condition="'$(TargetFramework)' == 'netstandard2.0'">$(NoWarn);nullable</NoWarn>
-    <!-- DaneStream passes through the SslStream cipher properties which are obsolete since .NET 10 -->
-    <NoWarn Condition="'$(TargetFramework)' == 'net10.0'">$(NoWarn);SYSLIB0058</NoWarn>
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 </Project>

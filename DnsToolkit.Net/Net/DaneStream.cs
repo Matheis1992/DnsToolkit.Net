@@ -38,7 +38,8 @@ namespace DnsToolkit.Net.Net
 	public class DaneStream : AuthenticatedStream
 	{
 #if NETSTANDARD2_0
-		private const SslProtocols DefaultSslProtocols = SslProtocols.Tls12 | (SslProtocols) 12288 /* Tls13 */;
+		// Let the OS decide: .NET Framework < 4.8 rejects the Tls13 value, and older Windows versions do not support TLS 1.3
+		private const SslProtocols DefaultSslProtocols = SslProtocols.None;
 #else
 		private const SslProtocols DefaultSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13;
 #endif
@@ -340,6 +341,8 @@ namespace DnsToolkit.Net.Net
 		/// </summary>
 		public X509Certificate? RemoteCertificate => _sslStream.RemoteCertificate;
 
+		// The cipher properties of SslStream are obsolete since .NET 10, DaneStream only passes them through
+#pragma warning disable SYSLIB0058
 		/// <summary>
 		///   Gets a value that identifies the bulk encryption algorithm used by this SslStream.
 		/// </summary>
@@ -369,6 +372,7 @@ namespace DnsToolkit.Net.Net
 		///   Gets a value that identifies the strength of the key exchange algorithm used by this instance.
 		/// </summary>
 		public int KeyExchangeStrength => _sslStream.KeyExchangeStrength;
+#pragma warning restore SYSLIB0058
 
 		/// <summary>
 		///   Gets a Boolean value that indicates whether the underlying stream is seekable.

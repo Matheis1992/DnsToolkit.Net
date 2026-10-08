@@ -33,14 +33,42 @@ internal static class NetStandardPolyfills
 		return task.WaitAsync(Timeout.InfiniteTimeSpan, token);
 	}
 
-	public static async Task WaitAsync(this Task task, TimeSpan timeout, CancellationToken token)
+	public static Task WaitAsync(this Task task, TimeSpan timeout, CancellationToken token)
 	{
-		if (!task.IsCompleted)
-		{
-			using var cts = CancellationTokenSource.CreateLinkedTokenSource(token);
+		if (task.IsCompleted || ((timeout == Timeout.InfiniteTimeSpan) && !token.CanBeCanceled))
+			return task;
 
+		return WaitAsyncCore(task, timeout, token);
+	}
+
+	public static Task<T> WaitAsync<T>(this Task<T> task, CancellationToken token)
+	{
+		return task.WaitAsync(Timeout.InfiniteTimeSpan, token);
+	}
+
+	public static Task<T> WaitAsync<T>(this Task<T> task, TimeSpan timeout, CancellationToken token)
+	{
+		if (task.IsCompleted || ((timeout == Timeout.InfiniteTimeSpan) && !token.CanBeCanceled))
+			return task;
+
+		return WaitAsyncCore(task, timeout, token);
+	}
+
+	private static async Task<T> WaitAsyncCore<T>(Task<T> task, TimeSpan timeout, CancellationToken token)
+	{
+		await WaitAsyncCore((Task) task, timeout, token).ConfigureAwait(false);
+		return task.Result;
+	}
+
+	private static async Task WaitAsyncCore(Task task, TimeSpan timeout, CancellationToken token)
+	{
+		using (var cts = token.CanBeCanceled ? CancellationTokenSource.CreateLinkedTokenSource(token) : new CancellationTokenSource())
+		{
 			if (await Task.WhenAny(task, Task.Delay(timeout, cts.Token)).ConfigureAwait(false) != task)
 			{
+				// The operation itself cannot be cancelled, so at least observe its exception to avoid UnobservedTaskException
+				_ = task.ContinueWith(t => _ = t.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+
 				token.ThrowIfCancellationRequested();
 				throw new TimeoutException();
 			}
@@ -49,17 +77,6 @@ internal static class NetStandardPolyfills
 		}
 
 		await task.ConfigureAwait(false);
-	}
-
-	public static Task<T> WaitAsync<T>(this Task<T> task, CancellationToken token)
-	{
-		return task.WaitAsync(Timeout.InfiniteTimeSpan, token);
-	}
-
-	public static async Task<T> WaitAsync<T>(this Task<T> task, TimeSpan timeout, CancellationToken token)
-	{
-		await ((Task) task).WaitAsync(timeout, token).ConfigureAwait(false);
-		return task.Result;
 	}
 
 	public static CancellationTokenRegistration Register(this CancellationToken token, Action<object?, CancellationToken> callback, object? state)
@@ -124,19 +141,44 @@ internal static class NetStandardPolyfills
 		return content.CopyToAsync(stream).WaitAsync(token);
 	}
 
-	public static Task<TcpClient> AcceptTcpClientAsync(this TcpListener listener, CancellationToken token)
+	public static async Task<TcpClient> AcceptTcpClientAsync(this TcpListener listener, CancellationToken token)
 	{
-		return listener.AcceptTcpClientAsync().WaitAsync(token);
+		var acceptTask = listener.AcceptTcpClientAsync();
+
+		try
+		{
+			return await acceptTask.WaitAsync(token).ConfigureAwait(false);
+		}
+		catch (OperationCanceledException)
+		{
+			// The pending accept cannot be cancelled, so close a client which is accepted after cancellation
+			_ = acceptTask.ContinueWith(t => t.Result.Dispose(), CancellationToken.None, TaskContinuationOptions.OnlyOnRanToCompletion | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+			throw;
+		}
 	}
 
 	public static ValueTask ConnectAsync(this TcpClient client, IPAddress address, int port, CancellationToken token)
 	{
-		return new ValueTask(client.ConnectAsync(address, port).WaitAsync(token));
+		return new ValueTask(ConnectAsyncCore(client.ConnectAsync(address, port), client, token));
 	}
 
 	public static ValueTask ConnectAsync(this Socket socket, IPAddress address, int port, CancellationToken token)
 	{
-		return new ValueTask(socket.ConnectAsync(address, port).WaitAsync(token));
+		return new ValueTask(ConnectAsyncCore(socket.ConnectAsync(address, port), socket, token));
+	}
+
+	private static async Task ConnectAsyncCore(Task connectTask, IDisposable connection, CancellationToken token)
+	{
+		try
+		{
+			await connectTask.WaitAsync(token).ConfigureAwait(false);
+		}
+		catch (OperationCanceledException)
+		{
+			// The pending connect cannot be cancelled, so close the socket to abort it
+			connection.Dispose();
+			throw;
+		}
 	}
 
 	public static ValueTask<int> SendToAsync(this Socket socket, ArraySegment<byte> buffer, SocketFlags socketFlags, EndPoint remoteEP, CancellationToken token)

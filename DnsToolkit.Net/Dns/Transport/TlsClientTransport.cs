@@ -1,14 +1,14 @@
 #region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
-// 
+//
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //   http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,10 +18,8 @@
 
 using System.Net.Security;
 using System.Net.Sockets;
-#if NETSTANDARD2_0
 using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
-#endif
 
 namespace DnsToolkit.Net.Dns;
 
@@ -41,6 +39,9 @@ public class TlsClientTransport : TcpClientTransportBase<TlsClientTransport>
 	private readonly SslProtocols _enabledSslProtocols;
 	private readonly bool _checkCertificateRevocation;
 	private readonly RemoteCertificateValidationCallback? _remoteCertificateValidationCallback;
+#else
+	private readonly SslClientAuthenticationOptions _sslClientAuthenticationOptions;
+#endif
 
 	/// <summary>
 	///   Creates a new instance of the TlsClientTransport
@@ -54,29 +55,25 @@ public class TlsClientTransport : TcpClientTransportBase<TlsClientTransport>
 	public TlsClientTransport(string targetHost, X509CertificateCollection? clientCertificates = null, SslProtocols enabledSslProtocols = SslProtocols.None, bool checkCertificateRevocation = false, RemoteCertificateValidationCallback? remoteCertificateValidationCallback = null, int port = DEFAULT_PORT)
 		: base(port)
 	{
+#if NETSTANDARD2_0
 		_targetHost = targetHost;
 		_clientCertificates = clientCertificates;
 		_enabledSslProtocols = enabledSslProtocols;
 		_checkCertificateRevocation = checkCertificateRevocation;
 		_remoteCertificateValidationCallback = remoteCertificateValidationCallback;
-	}
-
-	protected override async Task<Stream?> GetStreamAsync(TcpClient client, CancellationToken token)
-	{
-		var stream = new SslStream(client.GetStream(), false, _remoteCertificateValidationCallback);
-
-		using (token.Register(stream.Dispose))
-		{
-			await stream.AuthenticateAsClientAsync(_targetHost, _clientCertificates ?? new X509CertificateCollection(), _enabledSslProtocols, _checkCertificateRevocation);
-		}
-
-		token.ThrowIfCancellationRequested();
-
-		return stream;
-	}
 #else
-	private readonly SslClientAuthenticationOptions _sslClientAuthenticationOptions;
+		_sslClientAuthenticationOptions = new SslClientAuthenticationOptions
+		{
+			TargetHost = targetHost,
+			ClientCertificates = clientCertificates,
+			EnabledSslProtocols = enabledSslProtocols,
+			CertificateRevocationCheckMode = checkCertificateRevocation ? X509RevocationMode.Online : X509RevocationMode.NoCheck,
+			RemoteCertificateValidationCallback = remoteCertificateValidationCallback,
+		};
+#endif
+	}
 
+#if !NETSTANDARD2_0
 	/// <summary>
 	///   Creates a new instance of the TlsClientTransport
 	/// </summary>
@@ -87,14 +84,40 @@ public class TlsClientTransport : TcpClientTransportBase<TlsClientTransport>
 	{
 		_sslClientAuthenticationOptions = sslClientAuthenticationOptions;
 	}
+#endif
 
 	protected override async Task<Stream?> GetStreamAsync(TcpClient client, CancellationToken token)
 	{
+#if NETSTANDARD2_0
+		var stream = new SslStream(client.GetStream(), false, _remoteCertificateValidationCallback);
+#else
 		var stream = new SslStream(client.GetStream(), false);
-
-		await stream.AuthenticateAsClientAsync(_sslClientAuthenticationOptions, token);
-
-		return stream;
-	}
 #endif
+
+		try
+		{
+#if NETSTANDARD2_0
+			// AuthenticateAsClientAsync does not support cancellation on netstandard2.0, so abort the handshake by disposing the stream
+			using (token.Register(stream.Dispose))
+			{
+				await stream.AuthenticateAsClientAsync(_targetHost, _clientCertificates ?? new X509CertificateCollection(), _enabledSslProtocols, _checkCertificateRevocation);
+			}
+#else
+			await stream.AuthenticateAsClientAsync(_sslClientAuthenticationOptions, token);
+#endif
+			token.ThrowIfCancellationRequested();
+
+			return stream;
+		}
+		catch (Exception) when (token.IsCancellationRequested)
+		{
+			stream.Dispose();
+			throw new OperationCanceledException(token);
+		}
+		catch
+		{
+			stream.Dispose();
+			throw;
+		}
+	}
 }

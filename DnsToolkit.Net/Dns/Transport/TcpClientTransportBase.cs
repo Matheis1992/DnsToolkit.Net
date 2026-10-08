@@ -60,10 +60,17 @@ public abstract class TcpClientTransportBase<TTransport> : PipelinedClientTransp
 
 			var stream = await GetStreamAsync(client, token);
 
-			return stream == null ? null : new TcpClientConnection(this, (IPEndPoint) client.Client.RemoteEndPoint!, (IPEndPoint) client.Client.LocalEndPoint!, client, stream);
+			if (stream == null)
+			{
+				client.Dispose();
+				return null;
+			}
+
+			return new TcpClientConnection(this, (IPEndPoint) client.Client.RemoteEndPoint!, (IPEndPoint) client.Client.LocalEndPoint!, client, stream);
 		}
 		catch
 		{
+			client.Dispose();
 			return null;
 		}
 	}

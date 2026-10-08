@@ -1,14 +1,14 @@
 #region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
-// 
+//
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //   http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -20,9 +20,7 @@ using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
-#if NETSTANDARD2_0
 using System.Security.Cryptography.X509Certificates;
-#endif
 using Org.BouncyCastle.Tls;
 using Org.BouncyCastle.Tls.Crypto;
 using Org.BouncyCastle.Tls.Crypto.Impl.BC;
@@ -51,6 +49,9 @@ public class TlsServerTransport : TcpServerTransportBase<TlsServerTransport>
 	private readonly SslProtocols _enabledSslProtocols;
 	private readonly bool _checkCertificateRevocation;
 	private readonly RemoteCertificateValidationCallback? _remoteCertificateValidationCallback;
+#else
+	private readonly SslServerAuthenticationOptions _sslServerAuthenticationOptions;
+#endif
 
 	/// <summary>
 	///   Creates a new instance of the TcpServerTransport
@@ -61,7 +62,7 @@ public class TlsServerTransport : TcpServerTransportBase<TlsServerTransport>
 	/// <param name="enabledSslProtocols">The enabled protocols, SslProtocols.None for the system default</param>
 	/// <param name="checkCertificateRevocation">A value that specifies whether the certificate revocation list is checked</param>
 	/// <param name="remoteCertificateValidationCallback">A callback for validating the client certificate, or null for the default validation</param>
-	/// <param name="timeout">The read an write timeout in milliseconds</param>
+	/// <param name="timeout">The read an write timeout in milliseconds, which also limits the duration of the TLS handshake</param>
 	/// <param name="keepAlive">
 	///   The keep alive timeout in milliseconds for waiting for subsequent queries on the same
 	///   connection
@@ -78,7 +79,7 @@ public class TlsServerTransport : TcpServerTransportBase<TlsServerTransport>
 	/// <param name="enabledSslProtocols">The enabled protocols, SslProtocols.None for the system default</param>
 	/// <param name="checkCertificateRevocation">A value that specifies whether the certificate revocation list is checked</param>
 	/// <param name="remoteCertificateValidationCallback">A callback for validating the client certificate, or null for the default validation</param>
-	/// <param name="timeout">The read an write timeout in milliseconds</param>
+	/// <param name="timeout">The read an write timeout in milliseconds, which also limits the duration of the TLS handshake</param>
 	/// <param name="keepAlive">
 	///   The keep alive timeout in milliseconds for waiting for subsequent queries on the same
 	///   connection
@@ -86,35 +87,31 @@ public class TlsServerTransport : TcpServerTransportBase<TlsServerTransport>
 	public TlsServerTransport(IPEndPoint bindEndPoint, X509Certificate serverCertificate, bool clientCertificateRequired = false, SslProtocols enabledSslProtocols = SslProtocols.None, bool checkCertificateRevocation = false, RemoteCertificateValidationCallback? remoteCertificateValidationCallback = null, int timeout = 5000, int keepAlive = 120000)
 		: base(bindEndPoint, timeout, keepAlive)
 	{
+#if NETSTANDARD2_0
 		_serverCertificate = serverCertificate;
 		_clientCertificateRequired = clientCertificateRequired;
 		_enabledSslProtocols = enabledSslProtocols;
 		_checkCertificateRevocation = checkCertificateRevocation;
 		_remoteCertificateValidationCallback = remoteCertificateValidationCallback;
-	}
-
-	private async Task<Stream> AuthenticateAsServerAsync(Stream innerStream, CancellationToken token)
-	{
-		var sslStream = new SslStream(innerStream, false, _remoteCertificateValidationCallback);
-
-		using (token.Register(sslStream.Dispose))
-		{
-			await sslStream.AuthenticateAsServerAsync(_serverCertificate, _clientCertificateRequired, _enabledSslProtocols, _checkCertificateRevocation);
-		}
-
-		token.ThrowIfCancellationRequested();
-
-		return sslStream;
-	}
 #else
-	private readonly SslServerAuthenticationOptions _sslServerAuthenticationOptions;
+		_sslServerAuthenticationOptions = new SslServerAuthenticationOptions
+		{
+			ServerCertificate = serverCertificate,
+			ClientCertificateRequired = clientCertificateRequired,
+			EnabledSslProtocols = enabledSslProtocols,
+			CertificateRevocationCheckMode = checkCertificateRevocation ? X509RevocationMode.Online : X509RevocationMode.NoCheck,
+			RemoteCertificateValidationCallback = remoteCertificateValidationCallback,
+		};
+#endif
+	}
 
+#if !NETSTANDARD2_0
 	/// <summary>
 	///   Creates a new instance of the TcpServerTransport
 	/// </summary>
 	/// <param name="bindAddress">The IP address on which the transport should listen</param>
 	/// <param name="sslServerAuthenticationOptions">The ssl connection property bag</param>
-	/// <param name="timeout">The read an write timeout in milliseconds</param>
+	/// <param name="timeout">The read an write timeout in milliseconds, which also limits the duration of the TLS handshake</param>
 	/// <param name="keepAlive">
 	///   The keep alive timeout in milliseconds for waiting for subsequent queries on the same
 	///   connection
@@ -127,7 +124,7 @@ public class TlsServerTransport : TcpServerTransportBase<TlsServerTransport>
 	/// </summary>
 	/// <param name="bindEndPoint">The IP endpoint on which the transport should listen</param>
 	/// <param name="sslServerAuthenticationOptions">The ssl connection property bag</param>
-	/// <param name="timeout">The read an write timeout in milliseconds</param>
+	/// <param name="timeout">The read an write timeout in milliseconds, which also limits the duration of the TLS handshake</param>
 	/// <param name="keepAlive">
 	///   The keep alive timeout in milliseconds for waiting for subsequent queries on the same
 	///   connection
@@ -137,14 +134,47 @@ public class TlsServerTransport : TcpServerTransportBase<TlsServerTransport>
 	{
 		_sslServerAuthenticationOptions = sslServerAuthenticationOptions;
 	}
+#endif
 
 	private async Task<Stream> AuthenticateAsServerAsync(Stream innerStream, CancellationToken token)
 	{
+		// Limit the handshake duration, otherwise clients which never complete the handshake keep their connection open
+		using var handshakeCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+		if (Timeout > 0)
+			handshakeCts.CancelAfter(Timeout);
+
+#if NETSTANDARD2_0
+		var sslStream = new SslStream(innerStream, false, _remoteCertificateValidationCallback);
+#else
 		var sslStream = new SslStream(innerStream, false);
-		await sslStream.AuthenticateAsServerAsync(_sslServerAuthenticationOptions, token);
-		return sslStream;
-	}
 #endif
+
+		try
+		{
+#if NETSTANDARD2_0
+			// AuthenticateAsServerAsync does not support cancellation on netstandard2.0, so abort the handshake by disposing the stream
+			using (handshakeCts.Token.Register(sslStream.Dispose))
+			{
+				await sslStream.AuthenticateAsServerAsync(_serverCertificate, _clientCertificateRequired, _enabledSslProtocols, _checkCertificateRevocation);
+			}
+#else
+			await sslStream.AuthenticateAsServerAsync(_sslServerAuthenticationOptions, handshakeCts.Token);
+#endif
+			handshakeCts.Token.ThrowIfCancellationRequested();
+
+			return sslStream;
+		}
+		catch (Exception) when (handshakeCts.IsCancellationRequested)
+		{
+			sslStream.Dispose();
+			throw new OperationCanceledException(handshakeCts.Token);
+		}
+		catch
+		{
+			sslStream.Dispose();
+			throw;
+		}
+	}
 
 	protected override TcpServerConnectionBase CreateConnection(TcpClient client, CancellationToken token)
 	{
