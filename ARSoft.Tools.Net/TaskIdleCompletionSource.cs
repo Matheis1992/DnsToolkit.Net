@@ -20,7 +20,11 @@ namespace ARSoft.Tools.Net;
 
 internal class TaskIdleCompletionSource : IDisposable
 {
+#if NETSTANDARD2_0
+	private readonly TaskCompletionSource<bool> _tcs = new();
+#else
 	private readonly TaskCompletionSource _tcs = new();
+#endif
 	private readonly Timer _timer;
 	private TimeSpan _timeout;
 
@@ -71,7 +75,11 @@ internal class TaskIdleCompletionSource : IDisposable
 	{
 		lock (_tcs)
 		{
+#if NETSTANDARD2_0
+			_tcs.TrySetResult(true);
+#else
 			_tcs.TrySetResult();
+#endif
 			_timer.Dispose();
 		}
 	}

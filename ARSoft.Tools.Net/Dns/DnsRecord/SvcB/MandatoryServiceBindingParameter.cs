@@ -72,6 +72,6 @@ public class MandatoryServiceBindingParameter : ServiceBindingParameterBase
 
 	protected override string ValueToString()
 	{
-		return String.Join(',', Keys.Select(ServiceBindingParameterKeyHelper.ToString));
+		return String.Join(",", Keys.Select(ServiceBindingParameterKeyHelper.ToString));
 	}
 }

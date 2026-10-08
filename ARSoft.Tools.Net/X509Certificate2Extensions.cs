@@ -97,13 +97,13 @@ namespace ARSoft.Tools.Net
 			switch (smimeaRecord.CertificateUsage)
 			{
 				case SMimeARecord.SMimeACertificateUsage.PkixTA:
-					return chain != null && chain.ChainElements.Any(x => VerifyCertificateBySMimeA(smimeaRecord, x.Certificate)) && certificate.Verify();
+					return chain != null && chain.ChainElements.Cast<X509ChainElement>().Any(x => VerifyCertificateBySMimeA(smimeaRecord, x.Certificate)) && certificate.Verify();
 
 				case SMimeARecord.SMimeACertificateUsage.PkixEE:
 					return VerifyCertificateBySMimeA(smimeaRecord, certificate) && certificate.Verify();
 
 				case SMimeARecord.SMimeACertificateUsage.DaneTA:
-					return chain != null && chain.ChainElements.Any(x => VerifyCertificateBySMimeA(smimeaRecord, x.Certificate));
+					return chain != null && chain.ChainElements.Cast<X509ChainElement>().Any(x => VerifyCertificateBySMimeA(smimeaRecord, x.Certificate));
 
 				case SMimeARecord.SMimeACertificateUsage.DaneEE:
 					return VerifyCertificateBySMimeA(smimeaRecord, certificate);

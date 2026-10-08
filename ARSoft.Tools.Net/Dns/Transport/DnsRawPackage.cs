@@ -52,14 +52,14 @@ public class DnsRawPackage
 	{
 		var tmp = 0;
 		Length = DnsMessageBase.ParseUShort(buffer, ref tmp);
-		MessageIdentification = DnsMessageIdentification.Parse(buffer[LENGTH_HEADER_LENGTH..]);
-		_dataWithLengthHeader = buffer;
+		MessageIdentification = DnsMessageIdentification.Parse(new ArraySegment<byte>(buffer, LENGTH_HEADER_LENGTH, buffer.Length - LENGTH_HEADER_LENGTH));
+		_dataWithLengthHeader = new ArraySegment<byte>(buffer);
 	}
 
 	internal DnsRawPackage(ArraySegment<byte> data, int length)
 	{
 		Length = length;
-		MessageIdentification = DnsMessageIdentification.Parse(data[LENGTH_HEADER_LENGTH..]);
+		MessageIdentification = DnsMessageIdentification.Parse(data.Slice(LENGTH_HEADER_LENGTH));
 		_dataWithLengthHeader = data;
 	}
 
@@ -77,7 +77,7 @@ public class DnsRawPackage
 		}
 		else
 		{
-			return _dataWithLengthHeader[LENGTH_HEADER_LENGTH..];
+			return _dataWithLengthHeader.Slice(LENGTH_HEADER_LENGTH);
 		}
 	}
 }

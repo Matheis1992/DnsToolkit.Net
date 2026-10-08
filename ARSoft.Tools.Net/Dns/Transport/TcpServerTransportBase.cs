@@ -172,7 +172,7 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 			try
 			{
 				var requestBuffer = new byte[2];
-				if (!await TryReadAsync(requestBuffer, TransportInternal.KeepAlive, token)) // client disconnected while reading or timeout
+				if (!await TryReadAsync(new ArraySegment<byte>(requestBuffer), TransportInternal.KeepAlive, token)) // client disconnected while reading or timeout
 					return null;
 
 				var offset = 0;

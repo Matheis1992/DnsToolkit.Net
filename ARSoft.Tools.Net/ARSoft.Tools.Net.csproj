@@ -1,12 +1,12 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFrameworks>net6.0</TargetFrameworks>
+    <TargetFrameworks>netstandard2.0;net8.0;net10.0</TargetFrameworks>
+    <LangVersion>latest</LangVersion>
     <ImplicitUsings>enable</ImplicitUsings>
     <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
     <GenerateDocumentationFile>True</GenerateDocumentationFile>
     <BaseOutputPath>..\bin</BaseOutputPath>
     <BaseIntermediateOutputPath></BaseIntermediateOutputPath>
-    <DocumentationFile>..\bin\$(Configuration)\net6.0\ARSoft.Tools.Net.xml</DocumentationFile>
     <Nullable>enable</Nullable>
     <Title>ARSoft.Tools.Net - C#/.Net DNS client/server, SPF and SenderID Library</Title>
     <Authors>Alexander Reinert</Authors>
@@ -20,9 +20,25 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <PackageReference Include="BouncyCastle.Cryptography" Version="2.4.0" />
-    <PackageReference Include="System.Net.Sockets" Version="4.3.0" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' != 'netstandard2.0'">
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
+    <PackageReference Include="System.Memory" Version="4.5.5" />
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+    <PackageReference Include="System.Threading.Tasks.Extensions" Version="4.5.4" />
+    <PackageReference Include="PolySharp" Version="1.15.0">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+
+    <!-- The DNS over HTTPS server requires ASP.NET Core and is only available on net8.0+ -->
+    <Compile Remove="Dns\EndpointRouteBuilderExtensions.cs" />
+    <Compile Remove="Dns\Transport\HttpsServerTransport.cs" />
   </ItemGroup>
 
   <ItemGroup>
@@ -55,6 +71,10 @@
 
   <PropertyGroup>
     <NoWarn>1701;1702;1591</NoWarn>
+    <!-- The netstandard2.0 BCL is not annotated for nullable reference types, which results in false positives -->
+    <NoWarn Condition="'$(TargetFramework)' == 'netstandard2.0'">$(NoWarn);nullable</NoWarn>
+    <!-- DaneStream passes through the SslStream cipher properties which are obsolete since .NET 10 -->
+    <NoWarn Condition="'$(TargetFramework)' == 'net10.0'">$(NoWarn);SYSLIB0058</NoWarn>
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 </Project>

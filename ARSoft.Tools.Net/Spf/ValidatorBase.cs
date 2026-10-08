@@ -625,7 +625,7 @@ namespace ARSoft.Tools.Net.Spf
 					string[] parts = letter.Split(delimiters);
 
 					if (pattern.Groups["reverse"].Value == "r")
-						parts = parts.Reverse().ToArray();
+						parts = Enumerable.Reverse(parts).ToArray();
 
 					int count = Int32.MaxValue;
 					if (!String.IsNullOrEmpty(pattern.Groups["count"].Value))

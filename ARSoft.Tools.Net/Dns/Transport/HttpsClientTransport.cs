@@ -31,11 +31,15 @@ public class HttpsClientTransport : IClientTransport
 	{
 		_uri = uri;
 
+#if NETSTANDARD2_0
+		_client = new HttpClient();
+#else
 		_client = new HttpClient()
 		{
 			DefaultRequestVersion = HttpVersion.Version20,
 			DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrHigher,
 		};
+#endif
 
 		_client.DefaultRequestHeaders.Accept.Clear();
 		_client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/dns-message"));

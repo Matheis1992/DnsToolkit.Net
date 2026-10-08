@@ -83,6 +83,6 @@ internal class IPv6HintBindingParameter : ServiceBindingParameterBase
 
 	protected override string ValueToString()
 	{
-		return String.Join<IPAddress>(',', IPv6Hints);
+		return String.Join<IPAddress>(",", IPv6Hints);
 	}
 }

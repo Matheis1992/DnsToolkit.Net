@@ -72,7 +72,7 @@ public class SvcBRecord : DnsRecordBase
 		{
 			var s = stringRepresentation[i];
 
-			var parts = s.Split('=', 2);
+			var parts = s.Split(new[] { '=' }, 2);
 
 			var type = ServiceBindingParameterKeyHelper.Parse(parts[0]);
 

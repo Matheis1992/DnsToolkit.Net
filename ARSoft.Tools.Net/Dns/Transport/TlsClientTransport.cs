@@ -18,6 +18,10 @@
 
 using System.Net.Security;
 using System.Net.Sockets;
+#if NETSTANDARD2_0
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
+#endif
 
 namespace ARSoft.Tools.Net.Dns;
 
@@ -26,12 +30,52 @@ namespace ARSoft.Tools.Net.Dns;
 /// </summary>
 public class TlsClientTransport : TcpClientTransportBase<TlsClientTransport>
 {
-	private readonly SslClientAuthenticationOptions _sslClientAuthenticationOptions;
-
 	/// <summary>
 	///   The default port of TLS DNS communication
 	/// </summary>
 	public const int DEFAULT_PORT = 853;
+
+#if NETSTANDARD2_0
+	private readonly string _targetHost;
+	private readonly X509CertificateCollection? _clientCertificates;
+	private readonly SslProtocols _enabledSslProtocols;
+	private readonly bool _checkCertificateRevocation;
+	private readonly RemoteCertificateValidationCallback? _remoteCertificateValidationCallback;
+
+	/// <summary>
+	///   Creates a new instance of the TlsClientTransport
+	/// </summary>
+	/// <param name="targetHost">The name of the server that shares the SslStream</param>
+	/// <param name="clientCertificates">The client certificates to be used, or null for none</param>
+	/// <param name="enabledSslProtocols">The enabled protocols, SslProtocols.None for the system default</param>
+	/// <param name="checkCertificateRevocation">A value that specifies whether the certificate revocation list is checked</param>
+	/// <param name="remoteCertificateValidationCallback">A callback for validating the server certificate, or null for the default validation</param>
+	/// <param name="port">The port to be used</param>
+	public TlsClientTransport(string targetHost, X509CertificateCollection? clientCertificates = null, SslProtocols enabledSslProtocols = SslProtocols.None, bool checkCertificateRevocation = false, RemoteCertificateValidationCallback? remoteCertificateValidationCallback = null, int port = DEFAULT_PORT)
+		: base(port)
+	{
+		_targetHost = targetHost;
+		_clientCertificates = clientCertificates;
+		_enabledSslProtocols = enabledSslProtocols;
+		_checkCertificateRevocation = checkCertificateRevocation;
+		_remoteCertificateValidationCallback = remoteCertificateValidationCallback;
+	}
+
+	protected override async Task<Stream?> GetStreamAsync(TcpClient client, CancellationToken token)
+	{
+		var stream = new SslStream(client.GetStream(), false, _remoteCertificateValidationCallback);
+
+		using (token.Register(stream.Dispose))
+		{
+			await stream.AuthenticateAsClientAsync(_targetHost, _clientCertificates ?? new X509CertificateCollection(), _enabledSslProtocols, _checkCertificateRevocation);
+		}
+
+		token.ThrowIfCancellationRequested();
+
+		return stream;
+	}
+#else
+	private readonly SslClientAuthenticationOptions _sslClientAuthenticationOptions;
 
 	/// <summary>
 	///   Creates a new instance of the TlsClientTransport
@@ -52,4 +96,5 @@ public class TlsClientTransport : TcpClientTransportBase<TlsClientTransport>
 
 		return stream;
 	}
+#endif
 }

@@ -95,7 +95,7 @@ internal class ALPNServiceBindingParameter : ServiceBindingParameterBase
 			}
 		}
 
-		return bytes[0..bytesPos];
+		return bytes.AsSpan(0, bytesPos).ToArray();
 	}
 
 	private static string EncodeIdentifier(byte[] bytes)
@@ -137,6 +137,6 @@ internal class ALPNServiceBindingParameter : ServiceBindingParameterBase
 
 	protected override string ValueToString()
 	{
-		return "\"" + String.Join(',', ALPNIdentifier.Select(EncodeIdentifier)).ToMasterfileLabelRepresentation() + "\"";
+		return "\"" + String.Join(",", ALPNIdentifier.Select(EncodeIdentifier)).ToMasterfileLabelRepresentation() + "\"";
 	}
 }
