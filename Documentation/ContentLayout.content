@@ -1,6 +1,6 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Topics>
-  <Topic id="89d89738-5679-43dc-9c36-a104b52ee842" visible="True" isDefault="true" title="Welcome to the ARSoft.Tools.Net library">
+  <Topic id="89d89738-5679-43dc-9c36-a104b52ee842" visible="True" isDefault="true" title="Welcome to the DnsToolkit.Net library">
     <HelpKeywords>
       <HelpKeyword index="K" term="Welcome" />
     </HelpKeywords>

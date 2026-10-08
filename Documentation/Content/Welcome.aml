@@ -3,7 +3,7 @@
   <developerConceptualDocument xmlns="http://ddue.schemas.microsoft.com/authoring/2003/5" xmlns:xlink="http://www.w3.org/1999/xlink">
     <introduction>
       <para>
-        Welcome to ARSoft.Tools.Net library
+        Welcome to DnsToolkit.Net library
       </para>
     </introduction>
     <section>
@@ -41,8 +41,8 @@
       <content>
         <para>
           The library is avaible on Nuget, too: <externalLink>
-            <linkText>http://nuget.org/packages/ARSoft.Tools.Net</linkText>
-            <linkUri>http://nuget.org/packages/ARSoft.Tools.Net</linkUri>
+            <linkText>http://nuget.org/packages/DnsToolkit.Net</linkText>
+            <linkUri>http://nuget.org/packages/DnsToolkit.Net</linkUri>
           </externalLink>
         </para>
       </content>
@@ -447,7 +447,7 @@
         <para>
           The library is released under <externalLink>
             <linkText>Apache License 2.0</linkText>
-            <linkUri>https://github.com/alexreinert/ARSoft.Tools.Net/blob/master/LICENSE</linkUri>
+            <linkUri>https://github.com/Matheis1992/DnsToolkit.Net/blob/main/LICENSE</linkUri>
           </externalLink>
         </para>
       </content>

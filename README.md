@@ -1,15 +1,24 @@
-# Project Description
-This project contains a complete managed .Net SPF validation, SenderID validation and a dns client and dns server implementation written in C#.
+# DnsToolkit.Net
+A complete managed .Net DNS client and DNS server, DNSSEC and DANE validation and SPF and SenderID validation written in C#.
 
-# Donations
-If you use this library, please send me your feedback and add a link to this page.
-In addition you can donate via [Ko-fi](https://ko-fi.com/alexreinert), [Paypal](https://www.paypal.com/donate/?cmd=_s-xclick&hosted_button_id=4PW43VJ2DZ7R2) or send me a gift from my [Amazon.de wishlist](https://www.amazon.de/gp/registry/wishlist/3NNUQIQO20AAP/ref=nav_wishlist_lists_1)
+DnsToolkit.Net is a fork of [ARSoft.Tools.Net](https://github.com/alexreinert/ARSoft.Tools.Net) by Alexander Reinert, which targets
+netstandard2.0, net8.0 and net10.0 instead of net6.0 only. All credit for the library itself goes to the original author.
+
+# Differences to ARSoft.Tools.Net
+* Namespaces and the assembly are named `DnsToolkit.Net` instead of `ARSoft.Tools.Net`
+* Targets netstandard2.0 (e.g. .NET Framework 4.6.2+), net8.0 and net10.0
+* On netstandard2.0:
+	* The DNS over HTTPS server (`HttpsServerTransport`, `MapDns`) is not available, as it requires ASP.NET Core. The DNS over HTTPS client is available.
+	* `TlsClientTransport` and `TlsServerTransport` take the TLS settings as explicit parameters, as `SslClientAuthenticationOptions` and `SslServerAuthenticationOptions` do not exist there.
 
 # Nuget Package
-The library is avaible on Nuget, too: [http://nuget.org/packages/ARSoft.Tools.Net](http://nuget.org/packages/ARSoft.Tools.Net)
+The library is available on Nuget: [https://www.nuget.org/packages/DnsToolkit.Net](https://www.nuget.org/packages/DnsToolkit.Net)
 
 # API Documentation
-A API documentation can be found at [https://docs.ar-soft.de/arsoft.tools.net](https://docs.ar-soft.de/arsoft.tools.net)
+The API documentation of the original library can be found at [https://docs.ar-soft.de/arsoft.tools.net](https://docs.ar-soft.de/arsoft.tools.net). Replace the namespace `ARSoft.Tools.Net` with `DnsToolkit.Net`.
+
+# Supporting the original author
+If you like this library, consider supporting the original author Alexander Reinert via [Ko-fi](https://ko-fi.com/alexreinert), [Paypal](https://www.paypal.com/donate/?cmd=_s-xclick&hosted_button_id=4PW43VJ2DZ7R2) or his [Amazon.de wishlist](https://www.amazon.de/gp/registry/wishlist/3NNUQIQO20AAP/ref=nav_wishlist_lists_1)
 
 # Features
 **Parsing and Validating of SPF/SenderID records:**
@@ -139,7 +148,7 @@ A API documentation can be found at [https://docs.ar-soft.de/arsoft.tools.net](h
 * draft-ietf-dnsop-svcb-https - Service binding and parameter specification via the DNS (DNS SVCB and HTTPS RRs) (Record parsing only)
 
 # License
-The library is released under [Apache License 2.0](https://github.com/alexreinert/ARSoft.Tools.Net/blob/master/LICENSE)
+The library is released under [Apache License 2.0](LICENSE)
 
 # Sponsors
 * [JetBrains](https://www.jetbrains.com/) supports this project with a free license of ReSharper.

@@ -1,3 +1,6 @@
+DnsToolkit.Net - C# DNS client/server and SPF Library, Copyright (c) 2026 Matheis1992 (https://github.com/Matheis1992/DnsToolkit.Net)
+This product is a modified version of ARSoft.Tools.Net. The modifications are recorded in the git history of the repository above.
+
 ARSoft.Tools.Net - C# DNS client/server and SPF Library, Copyright (c) 2010-2017 Alexander Reinert (https://github.com/alexreinert/ARSoft.Tools.Net)
 
 The library uses the Bouncy Castle C# API, Copyright (c) 2000-2016 The Legion of the Bouncy Castle Inc. (http://www.bouncycastle.org/csharp/)
