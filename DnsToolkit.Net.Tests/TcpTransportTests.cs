@@ -107,9 +107,53 @@ public class TcpTransportTests
 		}
 	}
 
-	private static LocalDnsServer CreateServer(int tcpTimeout = 5000, int tcpKeepAlive = 120000)
+	[Fact]
+	public async Task Tcp_QueriesWithSameIdentification_AreAllAnswered()
 	{
-		return new LocalDnsServer(new DnsRecordBase[] { new ARecord(_name, 60, _address) }, tcpTimeout: tcpTimeout, tcpKeepAlive: tcpKeepAlive);
+		// Random transaction ids of parallel queries for the same name collide now and then. Such a collision
+		// used to abort the whole pooled connection, including all other queries on it.
+		using var server = CreateServer();
+		using var client = server.CreateClient(new TcpClientTransport(server.Port), queryTimeout: 2000);
+
+		var responses = await Task.WhenAll(Enumerable.Range(0, 10).Select(_ => Task.Run(() =>
+		{
+			var query = new DnsMessage { TransactionID = 0x5555 };
+			query.Questions.Add(new DnsQuestion(_name, RecordType.A, RecordClass.INet));
+			return client.SendMessageAsync(query);
+		})));
+
+		Assert.All(responses, response => Assert.Contains(response!.AnswerRecords.OfType<ARecord>(), a => a.Address.Equals(_address)));
+	}
+
+	[Fact]
+	public async Task Server_AcceptsNextConnection_OnlyAfterOneWasClosed_WhenLimitIsReached()
+	{
+		using var server = CreateServer(maxConcurrentConnections: 1);
+
+		// the first client takes the only connection slot and stays idle
+		using var first = new TcpClient();
+		await first.ConnectAsync(IPAddress.Loopback, server.Port);
+		await Task.Delay(300);
+
+		// the second client is in the backlog of the operating system, its query is not answered yet
+		using var second = new TcpClient();
+		await second.ConnectAsync(IPAddress.Loopback, server.Port);
+		var query = Query(0x4242);
+		await second.GetStream().WriteAsync(query, 0, query.Length);
+
+		var response = ReadResponseAsync(second.GetStream());
+		Assert.False(await Task.WhenAny(response, Task.Delay(700)) == response, "The second connection was served, although the limit is one");
+
+		// closing the first connection frees the slot
+		first.Close();
+
+		Assert.True(await Task.WhenAny(response, Task.Delay(5000)) == response, "The second connection was not served after the first one was closed");
+		Assert.Equal(0x4242, (await response).TransactionID);
+	}
+
+	private static LocalDnsServer CreateServer(int tcpTimeout = 5000, int tcpKeepAlive = 120000, int maxConcurrentConnections = 1000)
+	{
+		return new LocalDnsServer(new DnsRecordBase[] { new ARecord(_name, 60, _address) }, tcpTimeout: tcpTimeout, tcpKeepAlive: tcpKeepAlive, maxConcurrentConnectionsPerTransport: maxConcurrentConnections);
 	}
 
 	private static byte[] Query(ushort transactionId)

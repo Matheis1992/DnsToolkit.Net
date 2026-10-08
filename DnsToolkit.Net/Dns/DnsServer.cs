@@ -78,6 +78,27 @@ namespace DnsToolkit.Net.Dns
 		/// <summary>
 		///   Starts the server
 		/// </summary>
+		/// <summary>
+		///   The maximum number of connections each transport processes at the same time. For UDP every query counts
+		///   as a connection. If the limit is reached, a transport accepts the next connection only after another one
+		///   was closed, so clients wait in the backlog of the operating system. The limit applies to each transport
+		///   separately, so e.g. idle TCP connections cannot block UDP. It has to be set before the server is started.
+		///   Default: 1000
+		/// </summary>
+		public int MaxConcurrentConnectionsPerTransport
+		{
+			get => _maxConcurrentConnectionsPerTransport;
+			set
+			{
+				if (value < 1)
+					throw new ArgumentOutOfRangeException(nameof(value), "At least one connection has to be allowed");
+
+				_maxConcurrentConnectionsPerTransport = value;
+			}
+		}
+
+		private int _maxConcurrentConnectionsPerTransport = 1000;
+
 		public void Start()
 		{
 			foreach (var transport in _transports)
@@ -88,7 +109,8 @@ namespace DnsToolkit.Net.Dns
 			_serverCancellationTokenSource = new CancellationTokenSource();
 
 			var token = _serverCancellationTokenSource.Token;
-			_transportTasks = _transports.Select(t => Task.Run(() => ConnectionLoopAsync(t, token))).ToArray();
+			var maxConnections = MaxConcurrentConnectionsPerTransport;
+			_transportTasks = _transports.Select(t => Task.Run(() => ConnectionLoopAsync(t, maxConnections, token))).ToArray();
 		}
 
 		/// <summary>
@@ -107,12 +129,25 @@ namespace DnsToolkit.Net.Dns
 			Task.WaitAll(_transportTasks, TimeSpan.FromSeconds(5));
 		}
 
-		private async Task ConnectionLoopAsync(IServerTransport transport, CancellationToken token)
+		private async Task ConnectionLoopAsync(IServerTransport transport, int maxConnections, CancellationToken token)
 		{
 			var failedAcceptCount = 0;
 
+			// One slot per connection in progress. It is not disposed, as connections may still release their slot after the loop ended.
+			var connectionSlots = new SemaphoreSlim(maxConnections, maxConnections);
+
 			while (!token.IsCancellationRequested)
 			{
+				try
+				{
+					// wait for a free slot before accepting, so the backlog of the operating system holds further clients
+					await connectionSlots.WaitAsync(token);
+				}
+				catch (OperationCanceledException)
+				{
+					break;
+				}
+
 				IServerConnection? connection;
 
 				try
@@ -121,6 +156,7 @@ namespace DnsToolkit.Net.Dns
 				}
 				catch (OperationCanceledException) when (token.IsCancellationRequested)
 				{
+					connectionSlots.Release();
 					break;
 				}
 				catch (Exception ex)
@@ -131,6 +167,8 @@ namespace DnsToolkit.Net.Dns
 
 				if (connection == null)
 				{
+					connectionSlots.Release();
+
 					// A transport which fails permanently returns immediately, so slow down to avoid a busy loop
 					if (++failedAcceptCount >= MAX_FAILED_ACCEPTS_WITHOUT_DELAY)
 					{
@@ -149,8 +187,8 @@ namespace DnsToolkit.Net.Dns
 
 				failedAcceptCount = 0;
 
-				// Not bound to the token, as the connection has to be disposed by ProcessConnectionAsync in any case
-				_ = Task.Run(() => ProcessConnectionAsync(connection, token));
+				// Not bound to the token, as the connection has to be disposed and its slot released in any case
+				_ = Task.Run(() => ProcessConnectionAsync(connection, () => connectionSlots.Release(), token));
 			}
 		}
 
@@ -160,11 +198,14 @@ namespace DnsToolkit.Net.Dns
 		private class RefCountDispose
 		{
 			private int _count = 0;
+			private int _isDisposed = 0;
 			private readonly IDisposable _disposable;
+			private readonly Action _onDisposed;
 
-			public RefCountDispose(IDisposable disposable)
+			public RefCountDispose(IDisposable disposable, Action onDisposed)
 			{
 				_disposable = disposable;
+				_onDisposed = onDisposed;
 			}
 
 			public void Increment()
@@ -174,16 +215,19 @@ namespace DnsToolkit.Net.Dns
 
 			public void Decrement()
 			{
-				if (Interlocked.Decrement(ref _count) <= 0)
+				if ((Interlocked.Decrement(ref _count) <= 0) && (Interlocked.Exchange(ref _isDisposed, 1) == 0))
+				{
 					_disposable.TryDispose();
+					_onDisposed();
+				}
 			}
 		}
 
-		private async Task ProcessConnectionAsync(IServerConnection connection, CancellationToken token)
+		private async Task ProcessConnectionAsync(IServerConnection connection, Action onDisposed, CancellationToken token)
 		{
 			// The receive loop holds one reference and every query in progress holds another one,
 			// so the connection is disposed after the loop ended and all queries are answered
-			var refCount = new RefCountDispose(connection);
+			var refCount = new RefCountDispose(connection, onDisposed);
 			refCount.Increment();
 
 			try

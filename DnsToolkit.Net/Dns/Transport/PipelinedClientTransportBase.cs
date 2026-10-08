@@ -182,10 +182,10 @@ public abstract class PipelinedClientTransportBase : IClientTransport
 		internal IPAddress DestinationAddress { get; }
 
 		// the receivers waiting for a response, used by the receive loop to deliver the responses
-		private readonly Dictionary<DnsMessageIdentification, TaskCompletionSource<DnsReceivedRawPackage?>> _receivers = new();
+		private readonly ReceiverQueues _receivers = new();
 
 		// the receivers registered by SendAsync, which are not yet requested by ReceiveAsync
-		private readonly Dictionary<DnsMessageIdentification, TaskCompletionSource<DnsReceivedRawPackage?>> _sentQueries = new();
+		private readonly ReceiverQueues _sentQueries = new();
 
 		private CancellationTokenSource _globalReceiveCts = new();
 
@@ -219,7 +219,7 @@ public abstract class PipelinedClientTransportBase : IClientTransport
 			}
 			finally
 			{
-				if (!isSent && (tcs != null))
+				if (!isSent)
 					UnregisterReceiver(package.MessageIdentification, tcs);
 			}
 		}
@@ -227,23 +227,21 @@ public abstract class PipelinedClientTransportBase : IClientTransport
 		/// <summary>
 		///   Registers a receiver for the response of a query and starts the receive loop if necessary
 		/// </summary>
-		/// <returns>The receiver, or null if a receiver for the identification is already registered by a send</returns>
-		private TaskCompletionSource<DnsReceivedRawPackage?>? RegisterReceiver(DnsMessageIdentification identification, bool isRegisteredBySend)
+		private TaskCompletionSource<DnsReceivedRawPackage?> RegisterReceiver(DnsMessageIdentification identification, bool isRegisteredBySend)
 		{
 			var tcs = new TaskCompletionSource<DnsReceivedRawPackage?>(TaskCreationOptions.RunContinuationsAsynchronously);
 			var startReceiver = false;
 
 			lock (_receivers)
 			{
-				// two queries with the same identification can not be told apart, so only the first one is registered on send
-				if (isRegisteredBySend && _receivers.ContainsKey(identification))
-					return null;
-
 				_idleTcs.Pause();
+
+				// Queries with the same identification (same transaction id and question) are interchangeable,
+				// so they are queued and served in order. Before, such a collision aborted the whole connection.
 				_receivers.Add(identification, tcs);
 
 				if (isRegisteredBySend)
-					_sentQueries[identification] = tcs;
+					_sentQueries.Add(identification, tcs);
 
 				if (_receivers.Count == 1)
 				{
@@ -262,11 +260,8 @@ public abstract class PipelinedClientTransportBase : IClientTransport
 		{
 			lock (_receivers)
 			{
-				if (_receivers.TryGetValue(identification, out var registered) && (registered == tcs))
-					_receivers.Remove(identification);
-
-				if (_sentQueries.TryGetValue(identification, out var sent) && (sent == tcs))
-					_sentQueries.Remove(identification);
+				_receivers.Remove(identification, tcs);
+				_sentQueries.Remove(identification, tcs);
 
 				if (_receivers.Count == 0)
 					_globalReceiveCts.Cancel();
@@ -289,12 +284,11 @@ public abstract class PipelinedClientTransportBase : IClientTransport
 				{
 					lock (_receivers)
 					{
-						foreach (var kvp in _receivers)
+						foreach (var receiver in _receivers.RemoveAll())
 						{
-							kvp.Value.TrySetResult(null);
+							receiver.TrySetResult(null);
 						}
 
-						_receivers.Clear();
 						return;
 					}
 				}
@@ -304,7 +298,7 @@ public abstract class PipelinedClientTransportBase : IClientTransport
 
 					lock (_receivers)
 					{
-						_receivers.Remove(package.MessageIdentification, out tcs);
+						tcs = _receivers.TakeFirst(package.MessageIdentification);
 
 						if (_receivers.Count == 0)
 						{
@@ -325,11 +319,11 @@ public abstract class PipelinedClientTransportBase : IClientTransport
 			// The receiver registered by SendAsync might already be completed by the receive loop
 			lock (_receivers)
 			{
-				_sentQueries.Remove(identification, out tcs);
+				tcs = _sentQueries.TakeFirst(identification);
 			}
 
 			// further messages of a multi message response (e.g. zone transfers) need a new receiver
-			tcs ??= RegisterReceiver(identification, isRegisteredBySend: false)!;
+			tcs ??= RegisterReceiver(identification, isRegisteredBySend: false);
 
 			if (token.CanBeCanceled)
 			{
@@ -345,24 +339,19 @@ public abstract class PipelinedClientTransportBase : IClientTransport
 		{
 			var casted = (Tuple<DnsMessageIdentification, TaskCompletionSource<DnsReceivedRawPackage?>>) state!;
 
-			TaskCompletionSource<DnsReceivedRawPackage?>? tcs;
+			bool isRemoved;
 
 			lock (_receivers)
 			{
-				// Remove the from _receivers list, but ensure that there is no collision of the identifier
-				if (_receivers.TryGetValue(casted.Item1, out tcs))
-				{
-					if (tcs == casted.Item2)
-					{
-						_receivers.Remove(casted.Item1, out tcs);
-					}
-				}
+				// only this receiver is removed, other queries with the same identification keep waiting
+				isRemoved = _receivers.Remove(casted.Item1, casted.Item2);
 
 				if (_receivers.Count == 0)
 					_globalReceiveCts.Cancel();
 			}
 
-			tcs?.TrySetCanceled();
+			if (isRemoved)
+				casted.Item2.TrySetCanceled();
 		}
 
 		public void RestartIdleTimeout(TimeSpan? timeout)
