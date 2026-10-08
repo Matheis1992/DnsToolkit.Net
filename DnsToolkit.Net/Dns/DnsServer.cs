@@ -87,8 +87,8 @@ namespace DnsToolkit.Net.Dns
 
 			_serverCancellationTokenSource = new CancellationTokenSource();
 
-			_transportTasks = _transports.Select<IServerTransport, Task>(t =>
-				Task.Run(() => ConnectionLoopAsync(t, _serverCancellationTokenSource.Token), _serverCancellationTokenSource.Token)).ToArray();
+			var token = _serverCancellationTokenSource.Token;
+			_transportTasks = _transports.Select(t => Task.Run(() => ConnectionLoopAsync(t, token))).ToArray();
 		}
 
 		/// <summary>
@@ -98,28 +98,64 @@ namespace DnsToolkit.Net.Dns
 		{
 			_serverCancellationTokenSource.Cancel();
 
-			Task.WaitAll(_transportTasks);
-
+			// Closing the transports also aborts pending accepts of transports, which do not observe the cancellation token
 			foreach (var transport in _transports)
 			{
 				transport.Close();
 			}
+
+			Task.WaitAll(_transportTasks, TimeSpan.FromSeconds(5));
 		}
 
-		private async void ConnectionLoopAsync(IServerTransport transport, CancellationToken token)
+		private async Task ConnectionLoopAsync(IServerTransport transport, CancellationToken token)
 		{
+			var failedAcceptCount = 0;
+
 			while (!token.IsCancellationRequested)
 			{
-				var connection = await transport.AcceptConnectionAsync(token);
+				IServerConnection? connection;
+
+				try
+				{
+					connection = await transport.AcceptConnectionAsync(token);
+				}
+				catch (OperationCanceledException) when (token.IsCancellationRequested)
+				{
+					break;
+				}
+				catch (Exception ex)
+				{
+					OnExceptionThrownAsync(ex);
+					connection = null;
+				}
 
 				if (connection == null)
-					continue;
+				{
+					// A transport which fails permanently returns immediately, so slow down to avoid a busy loop
+					if (++failedAcceptCount >= MAX_FAILED_ACCEPTS_WITHOUT_DELAY)
+					{
+						try
+						{
+							await Task.Delay(FAILED_ACCEPT_DELAY_MS, token);
+						}
+						catch (OperationCanceledException)
+						{
+							break;
+						}
+					}
 
-#pragma warning disable CS4014
-				Task.Run(() => ProcessConnectionAsync(connection, token), token);
-#pragma warning restore CS4014
+					continue;
+				}
+
+				failedAcceptCount = 0;
+
+				// Not bound to the token, as the connection has to be disposed by ProcessConnectionAsync in any case
+				_ = Task.Run(() => ProcessConnectionAsync(connection, token));
 			}
 		}
+
+		private const int MAX_FAILED_ACCEPTS_WITHOUT_DELAY = 100;
+		private const int FAILED_ACCEPT_DELAY_MS = 10;
 
 		private class RefCountDispose
 		{
@@ -143,9 +179,12 @@ namespace DnsToolkit.Net.Dns
 			}
 		}
 
-		private async void ProcessConnectionAsync(IServerConnection connection, CancellationToken token)
+		private async Task ProcessConnectionAsync(IServerConnection connection, CancellationToken token)
 		{
+			// The receive loop holds one reference and every query in progress holds another one,
+			// so the connection is disposed after the loop ended and all queries are answered
 			var refCount = new RefCountDispose(connection);
+			refCount.Increment();
 
 			try
 			{
@@ -160,20 +199,23 @@ namespace DnsToolkit.Net.Dns
 
 				while (connection.CanRead)
 				{
-					refCount.Increment();
 					var queryPackage = await connection.ReceiveAsync(token);
 
 					if (queryPackage == null)
 						break;
 
-#pragma warning disable CS4014
-					Task.Run(() => ProcessRawPackageAsync(connection, queryPackage, refCount, token), token);
-#pragma warning restore CS4014
+					refCount.Increment();
+
+					// Not bound to the token, as ProcessRawPackageAsync has to release its reference in any case
+					_ = Task.Run(() => ProcessRawPackageAsync(connection, queryPackage, refCount, token));
 				}
 			}
 			catch (Exception ex)
 			{
 				OnExceptionThrownAsync(ex);
+			}
+			finally
+			{
 				refCount.Decrement();
 			}
 		}

@@ -96,8 +96,20 @@ namespace DnsToolkit.Net.Dns
 		public void Add(DomainName name, RecordType recordType, RecordClass recordClass, DnsCacheRecordList<DnsRecordBase> records, int timeToLive)
 		{
 			CacheKey key = new CacheKey(name, recordType, recordClass);
-			_cache.TryAdd(key, new CacheValue(records, timeToLive));
+
+			// replace an existing entry, which might be expired
+			_cache[key] = new CacheValue(records, timeToLive);
+
+			if (_cleanupSchedule.IsCleanupDue())
+				RemoveExpiredItems();
 		}
+
+		private readonly CacheCleanupSchedule _cleanupSchedule = new CacheCleanupSchedule();
+
+		/// <summary>
+		///   The number of entries, including expired ones which are not yet removed
+		/// </summary>
+		internal int Count => _cache.Count;
 
 		public bool TryGetRecords<TRecord>(DomainName name, RecordType recordType, RecordClass recordClass, out List<TRecord>? records)
 			where TRecord : DnsRecordBase

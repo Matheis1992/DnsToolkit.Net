@@ -58,7 +58,15 @@ public abstract class TcpClientTransportBase<TTransport> : PipelinedClientTransp
 				return null;
 			}
 
-			var stream = await GetStreamAsync(client, token);
+			// Limit the stream setup (e.g. the TLS handshake), as the connect task is shared by all queries to this server
+			Stream? stream;
+			using (var setupCts = CancellationTokenSource.CreateLinkedTokenSource(token))
+			{
+				if (queryTimeout > 0)
+					setupCts.CancelAfter(queryTimeout);
+
+				stream = await GetStreamAsync(client, setupCts.Token);
+			}
 
 			if (stream == null)
 			{

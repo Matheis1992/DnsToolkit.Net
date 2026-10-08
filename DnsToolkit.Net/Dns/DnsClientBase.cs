@@ -166,7 +166,7 @@ namespace DnsToolkit.Net.Dns
 						if (!receivedMessage.Message.IsReliableResendingRequested)
 							return receivedMessage.Message;
 
-						var resendTransport = _transports.FirstOrDefault(t => t.SupportsReliableTransfer && t.MaximumAllowedQuerySize <= package.Length && t != connection.Transport);
+						var resendTransport = _transports.FirstOrDefault(t => t.SupportsReliableTransfer && t.MaximumAllowedQuerySize >= package.Length && t != connection.Transport);
 
 						if (resendTransport != null)
 						{
@@ -200,6 +200,10 @@ namespace DnsToolkit.Net.Dns
 					{
 						connection.MarkFaulty();
 					}
+				}
+				catch (Exception e) when (IsQueryAbort(e, token))
+				{
+					// Only this query was aborted, a pooled connection stays usable for the other queries
 				}
 				catch (Exception e)
 				{
@@ -246,6 +250,31 @@ namespace DnsToolkit.Net.Dns
 		private async Task<ReceivedMessage<TMessage>?> SendMessageAsync<TMessage>(DnsRawPackage package, IClientConnection connection, SelectTsigKey? tsigKeySelector, byte[]? tsigOriginalMac, CancellationToken token)
 			where TMessage : DnsMessageBase, new()
 		{
+			// Not all transports have an own timeout (e.g. TCP and TLS), so limit the time to wait for every message
+			using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+			if (QueryTimeout > 0)
+				timeoutCts.CancelAfter(QueryTimeout);
+
+			try
+			{
+				return await SendMessageAsync<TMessage>(package, connection, tsigKeySelector, tsigOriginalMac, timeoutCts);
+			}
+			catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !token.IsCancellationRequested)
+			{
+				throw new QueryTimeoutException();
+			}
+		}
+
+		/// <summary>
+		///   Only the query timed out, the connection itself might still be used by other queries
+		/// </summary>
+		private sealed class QueryTimeoutException : Exception { }
+
+		private async Task<ReceivedMessage<TMessage>?> SendMessageAsync<TMessage>(DnsRawPackage package, IClientConnection connection, SelectTsigKey? tsigKeySelector, byte[]? tsigOriginalMac, CancellationTokenSource timeoutCts)
+			where TMessage : DnsMessageBase, new()
+		{
+			var token = timeoutCts.Token;
+
 			if (!await connection.SendAsync(package, token))
 				return null;
 
@@ -260,6 +289,10 @@ namespace DnsToolkit.Net.Dns
 
 			while (isNextMessageWaiting)
 			{
+				// restart the timeout for every message of a multi message response (e.g. zone transfers)
+				if (QueryTimeout > 0)
+					timeoutCts.CancelAfter(QueryTimeout);
+
 				resultData = await connection.ReceiveAsync(package.MessageIdentification, token);
 
 				if (resultData == null)
@@ -293,12 +326,13 @@ namespace DnsToolkit.Net.Dns
 			if (message.IsReliableSendingRequested)
 				throw new NotSupportedException("Sending reliable messages is not supported in multicast mode");
 
-			var results = new BlockingCollection<TMessage>();
-			var cancellationTokenSource = new CancellationTokenSource();
+			using var results = new BlockingCollection<TMessage>();
 
-			cancellationTokenSource.CancelAfter(QueryTimeout);
+			// One linked source for all endpoints. It has to be disposed, otherwise it stays registered on the token of the caller
+			using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+			timeoutCts.CancelAfter(QueryTimeout);
 
-			var tasks = _endpointInfos.Select(x => SendMessageParallelAsync(multicastTransport, x, message, package, tsigKeySelector, tsigOriginalMac, results, CancellationTokenSource.CreateLinkedTokenSource(token, cancellationTokenSource.Token).Token)).ToArray();
+			var tasks = _endpointInfos.Select(x => SendMessageParallelAsync(multicastTransport, x, message, package, tsigKeySelector, tsigOriginalMac, results, timeoutCts.Token)).ToArray();
 
 			await Task.WhenAll(tasks);
 
@@ -316,6 +350,8 @@ namespace DnsToolkit.Net.Dns
 				if (!await connection.SendAsync(package, token))
 					return;
 
+				var resendTasks = new List<Task>();
+
 				while (true)
 				{
 					if (token.IsCancellationRequested)
@@ -323,8 +359,9 @@ namespace DnsToolkit.Net.Dns
 
 					var response = await connection.ReceiveAsync(package.MessageIdentification, token);
 
+					// The connection only returns null on timeout or failure, retrying would result in a busy loop
 					if (response == null)
-						continue;
+						break;
 
 					TMessage result;
 
@@ -344,16 +381,19 @@ namespace DnsToolkit.Net.Dns
 					if (result.ReturnCode == ReturnCode.ServerFailure)
 						continue;
 
-					var resendTransport = _transports.FirstOrDefault(t => t.SupportsReliableTransfer && t.MaximumAllowedQuerySize <= package.Length && t != connection.Transport);
+					var resendTransport = _transports.FirstOrDefault(t => t.SupportsReliableTransfer && t.MaximumAllowedQuerySize >= package.Length && t != connection.Transport);
 					if (result.IsReliableResendingRequested && resendTransport != null)
 					{
-						ResendParallelMessageAsync(resendTransport, new DnsClientEndpointInfo(false, response.RemoteEndpoint.Address, response.LocalEndpoint.Address), query, package, tsigKeySelector, tsigOriginalMac, results, token).Start();
+						resendTasks.Add(ResendParallelMessageAsync(resendTransport, new DnsClientEndpointInfo(false, response.RemoteEndpoint.Address, response.LocalEndpoint.Address), query, package, tsigKeySelector, tsigOriginalMac, results, token));
 					}
 					else
 					{
 						results.Add(result, token);
 					}
 				}
+
+				// The results of the resent queries have to be in the result list
+				await Task.WhenAll(resendTasks);
 			}
 		}
 
@@ -381,6 +421,10 @@ namespace DnsToolkit.Net.Dns
 					connection?.MarkFaulty();
 				}
 			}
+			catch (Exception e) when (IsQueryAbort(e, token))
+			{
+				// Only this query was aborted, a pooled connection stays usable for the other queries
+			}
 			catch (Exception e)
 			{
 				Trace.TraceError("Error on dns query: " + e);
@@ -390,6 +434,15 @@ namespace DnsToolkit.Net.Dns
 			{
 				connection?.Dispose();
 			}
+		}
+
+		/// <summary>
+		///   True, if the query timed out or was cancelled by the caller. These are no errors of the connection.
+		/// </summary>
+		private static bool IsQueryAbort(Exception exception, CancellationToken callerToken)
+		{
+			return exception is QueryTimeoutException
+			       || ((exception is OperationCanceledException) && callerToken.IsCancellationRequested);
 		}
 
 		private List<DnsClientEndpointInfo> GetEndpointInfos(IEnumerable<IPAddress> servers)

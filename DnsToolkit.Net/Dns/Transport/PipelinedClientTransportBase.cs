@@ -119,7 +119,7 @@ public abstract class PipelinedClientTransportBase : IClientTransport
 		lock (_pool)
 		{
 			if (_pool.TryGetValue(endpointInfo.DestinationAddress, out connectTask)
-			    && connectTask.IsCompleted
+			    && connectTask.Status == TaskStatus.RanToCompletion
 			    && (connectTask.Result == null || !connectTask.Result.IsAlive))
 			{
 				try
@@ -154,7 +154,8 @@ public abstract class PipelinedClientTransportBase : IClientTransport
 	{
 		lock (_pool)
 		{
-			if (_pool.TryGetValue(connection.DestinationAddress, out var connTask) && connTask.Result == connection)
+			// The pool may already contain a new connect task for this server, which must not be awaited inside the lock
+			if (_pool.TryGetValue(connection.DestinationAddress, out var connTask) && connTask.Status == TaskStatus.RanToCompletion && connTask.Result == connection)
 			{
 				_pool.Remove(connection.DestinationAddress);
 			}
@@ -167,7 +168,7 @@ public abstract class PipelinedClientTransportBase : IClientTransport
 		{
 			foreach (var conTask in _pool.Values)
 			{
-				conTask.ContinueWith(c => c.Result?.MarkFaulty());
+				conTask.ContinueWith(c => c.Result?.MarkFaulty(), CancellationToken.None, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default);
 			}
 
 			_pool.Clear();
@@ -272,7 +273,11 @@ public abstract class PipelinedClientTransportBase : IClientTransport
 				Task.Run(ReceiveTaskProcInternal).ConfigureAwait(false);
 
 			if (token.CanBeCanceled)
-				token.Register(CancelReceiveAsync, Tuple.Create(identification, tcs));
+			{
+				// Remove the registration once the query is done, otherwise it stays on long living tokens of the caller
+				var registration = token.Register(CancelReceiveAsync, Tuple.Create(identification, tcs));
+				tcs.Task.ContinueWith(_ => registration.Dispose(), CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+			}
 
 			return tcs.Task;
 		}

@@ -162,11 +162,13 @@ namespace DnsToolkit.Net.Dns
 			private async Task<DnsReceivedRawPackage?> ReceiveAsync(CancellationToken token = new CancellationToken())
 			{
 				var serverEndpoint = new IPEndPoint(_socket.AddressFamily == AddressFamily.InterNetwork ? IPAddress.Any : IPAddress.IPv6Any, _transport._port);
-				var buffer = new byte[_socket.ReceiveBufferSize + 2];
+				var buffer = UdpReceiveBuffer.Rent();
+				Task<SocketReceiveFromResult>? receiveTask = null;
 
 				try
 				{
-					var receiveRes = await _socket.ReceiveFromAsync(new ArraySegment<byte>(buffer, 2, buffer.Length - 2), SocketFlags.None, serverEndpoint).WithTimeout(_queryTimeout, token);
+					receiveTask = _socket.ReceiveFromAsync(UdpReceiveBuffer.GetReceiveSegment(buffer), SocketFlags.None, serverEndpoint);
+					var receiveRes = await receiveTask.WithTimeout(_queryTimeout, token);
 
 					if (receiveRes.ReceivedBytes == 0)
 					{
@@ -174,14 +176,16 @@ namespace DnsToolkit.Net.Dns
 						return null;
 					}
 
-					DnsMessageBase.EncodeUShort(buffer, 0, (ushort) receiveRes.ReceivedBytes);
-
-					return new DnsReceivedRawPackage(buffer, ((IPEndPoint) receiveRes.RemoteEndPoint), ((IPEndPoint) _socket.LocalEndPoint!));
+					return new DnsReceivedRawPackage(UdpReceiveBuffer.CopyMessage(buffer, receiveRes.ReceivedBytes), ((IPEndPoint) receiveRes.RemoteEndPoint), ((IPEndPoint) _socket.LocalEndPoint!));
 				}
 				catch
 				{
 					MarkFaulty();
 					return null;
+				}
+				finally
+				{
+					UdpReceiveBuffer.Return(buffer, receiveTask);
 				}
 			}
 

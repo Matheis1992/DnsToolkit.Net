@@ -64,14 +64,27 @@ namespace DnsToolkit.Net.Dns
 			{
 				lock (addresses)
 				{
-					addresses.Add(new CacheValue(timeToLive, address));
+					// values are equal by address, so replace an existing entry to update its expiration
+					var value = new CacheValue(timeToLive, address);
+					addresses.Remove(value);
+					addresses.Add(value);
 				}
 			}
 			else
 			{
 				_cache.TryAdd(zoneName, new HashSet<CacheValue>() { new CacheValue(timeToLive, address) });
 			}
+
+			if (_cleanupSchedule.IsCleanupDue())
+				RemoveExpiredItems();
 		}
+
+		private readonly CacheCleanupSchedule _cleanupSchedule = new CacheCleanupSchedule();
+
+		/// <summary>
+		///   The number of zones, including zones with only expired addresses which are not yet removed
+		/// </summary>
+		internal int Count => _cache.Count;
 
 		public bool TryGetAddresses(DomainName zoneName, out List<IPAddress>? addresses)
 		{
