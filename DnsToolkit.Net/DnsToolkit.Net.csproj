@@ -44,6 +44,7 @@
     <!-- The DNS over HTTPS server requires ASP.NET Core and is only available on net8.0+ -->
     <Compile Remove="Dns\EndpointRouteBuilderExtensions.cs" />
     <Compile Remove="Dns\Transport\HttpsServerTransport.cs" />
+    <Compile Remove="Dns\Transport\HttpsServerTransportOptions.cs" />
   </ItemGroup>
 
   <ItemGroup>

@@ -21,6 +21,8 @@ internal sealed class LocalDnsServer : IDisposable
 
 	public X509Certificate2 Certificate => _certificate.Value;
 
+	public static X509Certificate2 SharedCertificate => _certificate.Value;
+
 	public LocalDnsServer(IEnumerable<DnsRecordBase> records, int tlsHandshakeTimeout = 5000, int tcpTimeout = 5000, int tcpKeepAlive = 120000, int maxConcurrentConnectionsPerTransport = 1000)
 	{
 		_records = records.ToList();

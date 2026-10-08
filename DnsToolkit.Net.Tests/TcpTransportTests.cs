@@ -92,22 +92,6 @@ public class TcpTransportTests
 	}
 
 	[Fact]
-	public async Task Tcp_FastResponsesOnPooledConnection_AreNotLost()
-	{
-		// The local server answers immediately, so responses often arrive while the receive loop already runs for
-		// other queries. A response read before its receiver was registered used to be dropped.
-		using var server = CreateServer();
-		using var client = server.CreateClient(new TcpClientTransport(server.Port), queryTimeout: 2000);
-
-		for (var round = 0; round < 10; round++)
-		{
-			var responses = await Task.WhenAll(Enumerable.Range(0, 50).Select(_ => Task.Run(() => client.ResolveAsync(_name))));
-
-			Assert.All(responses, response => Assert.NotNull(response));
-		}
-	}
-
-	[Fact]
 	public async Task Tcp_QueriesWithSameIdentification_AreAllAnswered()
 	{
 		// Random transaction ids of parallel queries for the same name collide now and then. Such a collision

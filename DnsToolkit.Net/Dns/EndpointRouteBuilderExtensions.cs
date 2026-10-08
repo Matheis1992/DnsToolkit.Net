@@ -82,7 +82,13 @@ public static class EndpointRouteBuilderExtensions
 
 	private const string _DOH_CONTENT_TYPE = "application/dns-message";
 
-	private static async Task HandleRequestAsync(HttpContext ctx, CancellationToken token, DnsRawPackageDelegate handler)
+	/// <summary>
+	///   The maximum size of a DNS message, given by its two byte length in the wire format (RFC 8484 section 6)
+	/// </summary>
+	private const int _MAX_MESSAGE_SIZE = UInt16.MaxValue;
+
+	// internal for the tests, which call it with a simulated request
+	internal static async Task HandleRequestAsync(HttpContext ctx, CancellationToken token, DnsRawPackageDelegate handler)
 	{
 		string? contentType;
 		byte[] content;
@@ -113,12 +119,32 @@ public static class EndpointRouteBuilderExtensions
 		}
 		else if (ctx.Request.Method == HttpMethod.Post.Method)
 		{
+			if (ctx.Request.ContentLength > _MAX_MESSAGE_SIZE)
+			{
+				await Results.StatusCode((int) HttpStatusCode.RequestEntityTooLarge).ExecuteAsync(ctx);
+				return;
+			}
+
+			// Limit the body before reading it, so a larger body (e.g. without Content-Length) is aborted while
+			// reading instead of being buffered completely. A lower limit set for the server is kept.
+			var bodySizeFeature = ctx.Features.Get<IHttpMaxRequestBodySizeFeature>();
+			if ((bodySizeFeature != null) && !bodySizeFeature.IsReadOnly && !(bodySizeFeature.MaxRequestBodySize < _MAX_MESSAGE_SIZE))
+				bodySizeFeature.MaxRequestBodySize = _MAX_MESSAGE_SIZE;
+
 			using var ms = new MemoryStream();
 
 			ms.WriteByte(0);
 			ms.WriteByte(0);
 
-			await ctx.Request.Body.CopyToAsync(ms, token);
+			try
+			{
+				await ctx.Request.Body.CopyToAsync(ms, token);
+			}
+			catch (BadHttpRequestException ex) when (ex.StatusCode == (int) HttpStatusCode.RequestEntityTooLarge)
+			{
+				await Results.StatusCode((int) HttpStatusCode.RequestEntityTooLarge).ExecuteAsync(ctx);
+				return;
+			}
 
 			content = ms.ToArray();
 
@@ -136,9 +162,10 @@ public static class EndpointRouteBuilderExtensions
 			return;
 		}
 
-		if (content.Length > 512)
+		// the content contains the two bytes of the length header
+		if (content.Length - 2 > _MAX_MESSAGE_SIZE)
 		{
-			await Results.StatusCode((int) HttpStatusCode.MethodNotAllowed).ExecuteAsync(ctx);
+			await Results.StatusCode((int) HttpStatusCode.RequestEntityTooLarge).ExecuteAsync(ctx);
 			return;
 		}
 
