@@ -181,7 +181,12 @@ public abstract class PipelinedClientTransportBase : IClientTransport
 		private readonly IPipelineableClientConnection _connection;
 		internal IPAddress DestinationAddress { get; }
 
+		// the receivers waiting for a response, used by the receive loop to deliver the responses
 		private readonly Dictionary<DnsMessageIdentification, TaskCompletionSource<DnsReceivedRawPackage?>> _receivers = new();
+
+		// the receivers registered by SendAsync, which are not yet requested by ReceiveAsync
+		private readonly Dictionary<DnsMessageIdentification, TaskCompletionSource<DnsReceivedRawPackage?>> _sentQueries = new();
+
 		private CancellationTokenSource _globalReceiveCts = new();
 
 		private readonly TaskIdleCompletionSource _idleTcs;
@@ -199,13 +204,75 @@ public abstract class PipelinedClientTransportBase : IClientTransport
 
 		public bool IsAlive => _connection.IsAlive;
 
-		public Task<bool> SendAsync(DnsRawPackage package, CancellationToken token = new())
+		public async Task<bool> SendAsync(DnsRawPackage package, CancellationToken token = new())
 		{
-			lock (_connection)
+			// The receiver is registered before sending. Otherwise the receive loop, which may already run for other queries,
+			// could read a fast response before the receiver exists and would drop it.
+			var tcs = RegisterReceiver(package.MessageIdentification, isRegisteredBySend: true);
+
+			var isSent = false;
+			try
 			{
-				_idleTcs.Pause();
-				return _connection.SendAsync(package, token);
+				// concurrent sends are serialized by the connection
+				isSent = await _connection.SendAsync(package, token);
+				return isSent;
 			}
+			finally
+			{
+				if (!isSent && (tcs != null))
+					UnregisterReceiver(package.MessageIdentification, tcs);
+			}
+		}
+
+		/// <summary>
+		///   Registers a receiver for the response of a query and starts the receive loop if necessary
+		/// </summary>
+		/// <returns>The receiver, or null if a receiver for the identification is already registered by a send</returns>
+		private TaskCompletionSource<DnsReceivedRawPackage?>? RegisterReceiver(DnsMessageIdentification identification, bool isRegisteredBySend)
+		{
+			var tcs = new TaskCompletionSource<DnsReceivedRawPackage?>(TaskCreationOptions.RunContinuationsAsynchronously);
+			var startReceiver = false;
+
+			lock (_receivers)
+			{
+				// two queries with the same identification can not be told apart, so only the first one is registered on send
+				if (isRegisteredBySend && _receivers.ContainsKey(identification))
+					return null;
+
+				_idleTcs.Pause();
+				_receivers.Add(identification, tcs);
+
+				if (isRegisteredBySend)
+					_sentQueries[identification] = tcs;
+
+				if (_receivers.Count == 1)
+				{
+					_globalReceiveCts = new CancellationTokenSource();
+					startReceiver = true;
+				}
+			}
+
+			if (startReceiver)
+				_ = Task.Run(ReceiveTaskProcInternal);
+
+			return tcs;
+		}
+
+		private void UnregisterReceiver(DnsMessageIdentification identification, TaskCompletionSource<DnsReceivedRawPackage?> tcs)
+		{
+			lock (_receivers)
+			{
+				if (_receivers.TryGetValue(identification, out var registered) && (registered == tcs))
+					_receivers.Remove(identification);
+
+				if (_sentQueries.TryGetValue(identification, out var sent) && (sent == tcs))
+					_sentQueries.Remove(identification);
+
+				if (_receivers.Count == 0)
+					_globalReceiveCts.Cancel();
+			}
+
+			tcs.TrySetCanceled();
 		}
 
 		private async Task ReceiveTaskProcInternal()
@@ -224,7 +291,7 @@ public abstract class PipelinedClientTransportBase : IClientTransport
 					{
 						foreach (var kvp in _receivers)
 						{
-							kvp.Value.SetResult(null);
+							kvp.Value.TrySetResult(null);
 						}
 
 						_receivers.Clear();
@@ -246,31 +313,23 @@ public abstract class PipelinedClientTransportBase : IClientTransport
 						}
 					}
 
-					tcs?.SetResult(package);
+					tcs?.TrySetResult(package);
 				}
 			}
 		}
 
 		public Task<DnsReceivedRawPackage?> ReceiveAsync(DnsMessageIdentification identification, CancellationToken token = default)
 		{
-			var tcs = new TaskCompletionSource<DnsReceivedRawPackage?>(TaskCreationOptions.RunContinuationsAsynchronously);
+			TaskCompletionSource<DnsReceivedRawPackage?>? tcs;
 
-			var startReceiver = false;
-
+			// The receiver registered by SendAsync might already be completed by the receive loop
 			lock (_receivers)
 			{
-				_idleTcs.Pause();
-				_receivers.Add(identification, tcs);
-
-				if (_receivers.Count == 1)
-				{
-					_globalReceiveCts = new CancellationTokenSource();
-					startReceiver = true;
-				}
+				_sentQueries.Remove(identification, out tcs);
 			}
 
-			if (startReceiver)
-				Task.Run(ReceiveTaskProcInternal).ConfigureAwait(false);
+			// further messages of a multi message response (e.g. zone transfers) need a new receiver
+			tcs ??= RegisterReceiver(identification, isRegisteredBySend: false)!;
 
 			if (token.CanBeCanceled)
 			{

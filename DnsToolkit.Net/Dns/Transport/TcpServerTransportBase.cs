@@ -126,7 +126,7 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 	protected abstract class TcpServerConnectionBase : IServerConnection
 	{
 		protected readonly TTransport TransportInternal;
-		private Stream? _stream;
+		private DnsTcpMessageStream? _messageStream;
 
 		protected TcpClient Client { get; }
 
@@ -158,64 +158,40 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 		/// </summary>
 		public async Task<bool> InitializeAsync(CancellationToken token)
 		{
-			_stream = await GetStreamFromClientAsync(token);
-			return _stream != null;
+			var stream = await GetStreamFromClientAsync(token);
+			if (stream == null)
+				return false;
+
+			_messageStream = new DnsTcpMessageStream(stream);
+			return true;
 		}
 
 		/// <summary>
 		///   Receives a new package of the client
 		/// </summary>
 		/// <param name="token"> The token to monitor cancellation requests </param>
-		/// <returns>A raw package sent by the client</returns>
+		/// <returns>A raw package sent by the client, or null if the client disconnected or a timeout occured</returns>
 		public virtual async Task<DnsReceivedRawPackage?> ReceiveAsync(CancellationToken token = default)
 		{
+			if (_messageStream == null)
+				return null;
+
 			try
 			{
-				var requestBuffer = new byte[2];
-				if (!await TryReadAsync(new ArraySegment<byte>(requestBuffer), TransportInternal.KeepAlive, token)) // client disconnected while reading or timeout
-					return null;
+				var remoteEndPoint = RemoteEndPoint;
+				var localEndPoint = LocalEndPoint;
 
-				var offset = 0;
-				int requestLength = DnsMessageBase.ParseUShort(requestBuffer, ref offset);
+				// wait up to the keep alive for the next query, and up to the timeout for the rest of it
+				var message = await _messageStream.ReadMessageAsync(
+					DnsTcpMessageStream.ToTimeout(TransportInternal.KeepAlive),
+					DnsTcpMessageStream.ToTimeout(TransportInternal.Timeout),
+					token);
 
-				requestBuffer = new byte[requestLength + DnsRawPackage.LENGTH_HEADER_LENGTH];
-				if (!await TryReadAsync(new ArraySegment<byte>(requestBuffer, DnsRawPackage.LENGTH_HEADER_LENGTH, requestLength), TransportInternal.Timeout, token)) // client disconnected while reading or timeout
-					return null;
-
-				return new DnsReceivedRawPackage(requestBuffer, RemoteEndPoint, LocalEndPoint);
+				return message == null ? null : new DnsReceivedRawPackage(message, remoteEndPoint, localEndPoint);
 			}
 			catch
 			{
 				return null;
-			}
-		}
-
-		private async Task<bool> TryReadAsync(ArraySegment<byte> buffer, int timeout, CancellationToken token)
-		{
-			if (_stream == null)
-				return false;
-
-			try
-			{
-				var readBytes = 0;
-				while (readBytes < buffer.Count)
-				{
-					if (token.IsCancellationRequested || !Client.IsConnected())
-						return false;
-
-					var newReadBytes = await _stream.ReadAsync(buffer.Array!, buffer.Offset + readBytes, buffer.Count - readBytes, token).WithTimeout(timeout, token);
-
-					if (newReadBytes == 0) // timeout
-						return false;
-
-					readBytes += newReadBytes;
-				}
-
-				return true;
-			}
-			catch
-			{
-				return false;
 			}
 		}
 
@@ -227,12 +203,13 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 		/// <returns>true, of the package could be sent to the client; otherwise, false</returns>
 		public virtual async Task<bool> SendAsync(DnsRawPackage package, CancellationToken token = default)
 		{
-			if (_stream == null)
+			if (_messageStream == null)
 				return false;
 
 			try
 			{
-				await _stream.WriteAsync(package.ToArraySegment(true), token);
+				// serialized by the message stream, as responses to pipelined queries are sent concurrently
+				await _messageStream.WriteMessageAsync(package.ToArraySegment(true), token);
 				return true;
 			}
 			catch
@@ -248,7 +225,7 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 
 		public void Dispose()
 		{
-			_stream?.TryDispose();
+			_messageStream?.Dispose();
 			Client.TryDispose();
 		}
 	}

@@ -13,7 +13,9 @@ public class TransportTests : IDisposable
 	private static readonly IPAddress _address = IPAddress.Parse("192.0.2.1");
 	private static readonly RemoteCertificateValidationCallback _acceptAnyCertificate = (_, _, _, _) => true;
 
-	private readonly LocalDnsServer _server = new(new DnsRecordBase[] { new ARecord(_name, 60, _address) }, tlsHandshakeTimeout: 2000);
+	private static readonly DnsRecordBase[] _records = { new ARecord(_name, 60, _address) };
+
+	private readonly LocalDnsServer _server = new(_records);
 
 	public void Dispose()
 	{
@@ -71,8 +73,10 @@ public class TransportTests : IDisposable
 	[Fact]
 	public async Task TlsServer_ClosesConnectionWithoutHandshake_AfterTimeout()
 	{
+		// only this test uses a short handshake timeout, a handshake can take longer if the tests run in parallel
+		using var server = new LocalDnsServer(_records, tlsHandshakeTimeout: 2000);
 		using var idleClient = new TcpClient();
-		await idleClient.ConnectAsync(IPAddress.Loopback, _server.TlsPort);
+		await idleClient.ConnectAsync(IPAddress.Loopback, server.TlsPort);
 
 		var stopwatch = Stopwatch.StartNew();
 		var closed = await WaitForRemoteCloseAsync(idleClient, TimeSpan.FromSeconds(10));
