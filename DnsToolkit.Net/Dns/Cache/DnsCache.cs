@@ -1,14 +1,14 @@
-﻿#region Copyright and License
+#region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
-// 
+//
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //   http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -16,11 +16,7 @@
 // limitations under the License.
 #endregion
 
-using System;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace DnsToolkit.Net.Dns
 {
@@ -29,8 +25,20 @@ namespace DnsToolkit.Net.Dns
 		public DnsSecValidationResult ValidationResult { get; set; }
 	}
 
+	/// <summary>
+	///   Caches resolved records until their time to live expires. The cache is limited in size, expired entries
+	///   are removed regularly and the entries used least recently are removed first if the limit is reached.
+	/// </summary>
 	internal class DnsCache
 	{
+		/// <summary>
+		///   The default maximum number of cached records. An entry counts as its number of records plus one,
+		///   so that also negative answers without records count.
+		/// </summary>
+		public const long DEFAULT_SIZE_LIMIT = 100_000;
+
+		private static readonly TimeSpan _defaultExpirationScanFrequency = TimeSpan.FromMinutes(1);
+
 		private class CacheKey
 		{
 			private readonly DomainName _name;
@@ -46,7 +54,6 @@ namespace DnsToolkit.Net.Dns
 
 				_hashCode = name.GetHashCode() ^ (7 * (int) recordType) ^ (11 * (int) recordClass);
 			}
-
 
 			public override int GetHashCode()
 			{
@@ -74,14 +81,31 @@ namespace DnsToolkit.Net.Dns
 			public DateTime ExpireDateUtc { get; }
 			public DnsCacheRecordList<DnsRecordBase> Records { get; }
 
-			public CacheValue(DnsCacheRecordList<DnsRecordBase> records, int timeToLive)
+			public CacheValue(DnsCacheRecordList<DnsRecordBase> records, DateTime expireDateUtc)
 			{
 				Records = records;
-				ExpireDateUtc = DateTime.UtcNow.AddSeconds(timeToLive);
+				ExpireDateUtc = expireDateUtc;
 			}
 		}
 
-		private readonly ConcurrentDictionary<CacheKey, CacheValue> _cache = new ConcurrentDictionary<CacheKey, CacheValue>();
+		private readonly MemoryCache _cache;
+
+		public DnsCache()
+			: this(DEFAULT_SIZE_LIMIT, _defaultExpirationScanFrequency) { }
+
+		internal DnsCache(long sizeLimit, TimeSpan expirationScanFrequency)
+		{
+			_cache = new MemoryCache(new MemoryCacheOptions
+			{
+				SizeLimit = sizeLimit,
+				ExpirationScanFrequency = expirationScanFrequency,
+			});
+		}
+
+		/// <summary>
+		///   The number of entries
+		/// </summary>
+		internal int Count => _cache.Count;
 
 		public void Add<TRecord>(DomainName name, RecordType recordType, RecordClass recordClass, IEnumerable<TRecord> records, DnsSecValidationResult validationResult, int timeToLive)
 			where TRecord : DnsRecordBase
@@ -97,50 +121,29 @@ namespace DnsToolkit.Net.Dns
 		{
 			CacheKey key = new CacheKey(name, recordType, recordClass);
 
-			// replace an existing entry, which might be expired
-			_cache[key] = new CacheValue(records, timeToLive);
+			if (timeToLive <= 0)
+			{
+				// nothing to cache, but an older entry must not be returned anymore
+				_cache.Remove(key);
+				return;
+			}
 
-			if (_cleanupSchedule.IsCleanupDue())
-				RemoveExpiredItems();
+			var expireDateUtc = DateTime.UtcNow.AddSeconds(timeToLive);
+
+			// replaces an existing entry
+			_cache.Set(key, new CacheValue(records, expireDateUtc), new MemoryCacheEntryOptions
+			{
+				AbsoluteExpiration = new DateTimeOffset(expireDateUtc, TimeSpan.Zero),
+				Size = records.Count + 1,
+			});
 		}
-
-		private readonly CacheCleanupSchedule _cleanupSchedule = new CacheCleanupSchedule();
-
-		/// <summary>
-		///   The number of entries, including expired ones which are not yet removed
-		/// </summary>
-		internal int Count => _cache.Count;
 
 		public bool TryGetRecords<TRecord>(DomainName name, RecordType recordType, RecordClass recordClass, out List<TRecord>? records)
 			where TRecord : DnsRecordBase
 		{
-			CacheKey key = new CacheKey(name, recordType, recordClass);
-			DateTime utcNow = DateTime.UtcNow;
-
-			CacheValue? cacheValue;
-			if (_cache.TryGetValue(key, out cacheValue))
+			if (TryGetRecords(name, recordType, recordClass, out DnsCacheRecordList<TRecord>? cachedRecords))
 			{
-				if (cacheValue.ExpireDateUtc < utcNow)
-				{
-					_cache.TryRemove(key, out cacheValue);
-					records = null;
-					return false;
-				}
-
-				int ttl = (int) (cacheValue.ExpireDateUtc - utcNow).TotalSeconds;
-
-				records = new List<TRecord>();
-
-				records.AddRange(cacheValue
-					.Records
-					.OfType<TRecord>()
-					.Select(x =>
-					{
-						TRecord record = x.Clone<TRecord>();
-						record.TimeToLive = ttl;
-						return record;
-					}));
-
+				records = cachedRecords;
 				return true;
 			}
 
@@ -154,16 +157,8 @@ namespace DnsToolkit.Net.Dns
 			CacheKey key = new CacheKey(name, recordType, recordClass);
 			DateTime utcNow = DateTime.UtcNow;
 
-			CacheValue? cacheValue;
-			if (_cache.TryGetValue(key, out cacheValue))
+			if (_cache.TryGetValue(key, out CacheValue? cacheValue) && (cacheValue!.ExpireDateUtc > utcNow))
 			{
-				if (cacheValue.ExpireDateUtc < utcNow)
-				{
-					_cache.TryRemove(key, out cacheValue);
-					records = null;
-					return false;
-				}
-
 				int ttl = (int) (cacheValue.ExpireDateUtc - utcNow).TotalSeconds;
 
 				records = new DnsCacheRecordList<TRecord>();
@@ -185,18 +180,6 @@ namespace DnsToolkit.Net.Dns
 
 			records = null;
 			return false;
-		}
-
-		public void RemoveExpiredItems()
-		{
-			DateTime utcNow = DateTime.UtcNow;
-
-			foreach (var kvp in _cache)
-			{
-				CacheValue? tmp;
-				if (kvp.Value.ExpireDateUtc < utcNow)
-					_cache.TryRemove(kvp.Key, out tmp);
-			}
 		}
 	}
 }

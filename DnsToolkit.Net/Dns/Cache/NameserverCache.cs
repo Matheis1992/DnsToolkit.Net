@@ -1,14 +1,14 @@
-﻿#region Copyright and License
+#region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
-// 
+//
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //   http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -16,108 +16,97 @@
 // limitations under the License.
 #endregion
 
-using System;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Linq;
 using System.Net;
-using System.Text;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace DnsToolkit.Net.Dns
 {
+	/// <summary>
+	///   Caches the nameserver addresses of zones. Every address expires on its own, a zone is removed with its
+	///   last address. The cache is limited in size, the zones used least recently are removed first.
+	/// </summary>
 	internal class NameserverCache
 	{
-		private class CacheValue
-		{
-			public DateTime ExpireDateUtc { get; }
-			public IPAddress Address { get; }
+		/// <summary>
+		///   The default maximum number of cached zones
+		/// </summary>
+		public const long DEFAULT_SIZE_LIMIT = 10_000;
 
-			public CacheValue(int timeToLive, IPAddress address)
-			{
-				ExpireDateUtc = DateTime.UtcNow.AddSeconds(timeToLive);
-				Address = address;
-			}
-
-			public override int GetHashCode()
-			{
-				return Address.GetHashCode();
-			}
-
-			public override bool Equals(object? obj)
-			{
-				CacheValue? second = obj as CacheValue;
-
-				if (second == null)
-					return false;
-
-				return Address.Equals(second.Address);
-			}
-		}
-
-		private readonly ConcurrentDictionary<DomainName, HashSet<CacheValue>> _cache = new ConcurrentDictionary<DomainName, HashSet<CacheValue>>();
-
-		public void Add(DomainName zoneName, IPAddress address, int timeToLive)
-		{
-			HashSet<CacheValue>? addresses;
-
-			if (_cache.TryGetValue(zoneName, out addresses))
-			{
-				lock (addresses)
-				{
-					// values are equal by address, so replace an existing entry to update its expiration
-					var value = new CacheValue(timeToLive, address);
-					addresses.Remove(value);
-					addresses.Add(value);
-				}
-			}
-			else
-			{
-				_cache.TryAdd(zoneName, new HashSet<CacheValue>() { new CacheValue(timeToLive, address) });
-			}
-
-			if (_cleanupSchedule.IsCleanupDue())
-				RemoveExpiredItems();
-		}
-
-		private readonly CacheCleanupSchedule _cleanupSchedule = new CacheCleanupSchedule();
+		private static readonly TimeSpan _defaultExpirationScanFrequency = TimeSpan.FromMinutes(1);
 
 		/// <summary>
-		///   The number of zones, including zones with only expired addresses which are not yet removed
+		///   The addresses of a zone with their expiration
+		/// </summary>
+		private class ZoneAddresses
+		{
+			public readonly Dictionary<IPAddress, DateTime> ExpireDatesUtc = new();
+		}
+
+		private readonly MemoryCache _cache;
+
+		// serializes the read-modify-write of zone entries, adding nameservers is rare compared to lookups
+		private readonly object _addLock = new();
+
+		public NameserverCache()
+			: this(DEFAULT_SIZE_LIMIT, _defaultExpirationScanFrequency) { }
+
+		internal NameserverCache(long sizeLimit, TimeSpan expirationScanFrequency)
+		{
+			_cache = new MemoryCache(new MemoryCacheOptions
+			{
+				SizeLimit = sizeLimit,
+				ExpirationScanFrequency = expirationScanFrequency,
+			});
+		}
+
+		/// <summary>
+		///   The number of zones
 		/// </summary>
 		internal int Count => _cache.Count;
 
+		public void Add(DomainName zoneName, IPAddress address, int timeToLive)
+		{
+			var utcNow = DateTime.UtcNow;
+			var expireDateUtc = utcNow.AddSeconds(timeToLive);
+
+			lock (_addLock)
+			{
+				var zone = _cache.TryGetValue(zoneName, out ZoneAddresses? existing) ? existing! : new ZoneAddresses();
+
+				DateTime zoneExpireDateUtc;
+				lock (zone)
+				{
+					// replaces the expiration of a known address
+					zone.ExpireDatesUtc[address] = expireDateUtc;
+					RemoveExpired(zone, utcNow);
+
+					if (zone.ExpireDatesUtc.Count == 0)
+					{
+						_cache.Remove(zoneName);
+						return;
+					}
+
+					zoneExpireDateUtc = zone.ExpireDatesUtc.Values.Max();
+				}
+
+				// the expiration of a cache entry cannot be changed, so the entry is set again
+				_cache.Set(zoneName, zone, new MemoryCacheEntryOptions
+				{
+					AbsoluteExpiration = new DateTimeOffset(zoneExpireDateUtc, TimeSpan.Zero),
+					Size = 1,
+				});
+			}
+		}
+
 		public bool TryGetAddresses(DomainName zoneName, out List<IPAddress>? addresses)
 		{
-			DateTime utcNow = DateTime.UtcNow;
-
-			HashSet<CacheValue>? cacheValues;
-			if (_cache.TryGetValue(zoneName, out cacheValues))
+			if (_cache.TryGetValue(zoneName, out ZoneAddresses? zone))
 			{
-				addresses = new List<IPAddress>();
-				bool needsCleanup = false;
+				var utcNow = DateTime.UtcNow;
 
-				lock (cacheValues)
+				lock (zone!)
 				{
-					foreach (CacheValue cacheValue in cacheValues)
-					{
-						if (cacheValue.ExpireDateUtc < utcNow)
-						{
-							needsCleanup = true;
-						}
-						else
-						{
-							addresses.Add(cacheValue.Address);
-						}
-					}
-
-					if (needsCleanup)
-					{
-						cacheValues.RemoveWhere(x => x.ExpireDateUtc < utcNow);
-						if (cacheValues.Count == 0)
-#pragma warning disable 0728
-							_cache.TryRemove(zoneName, out cacheValues);
-#pragma warning restore 0728
-					}
+					addresses = zone.ExpireDatesUtc.Where(x => x.Value > utcNow).Select(x => x.Key).ToList();
 				}
 
 				if (addresses.Count > 0)
@@ -128,21 +117,10 @@ namespace DnsToolkit.Net.Dns
 			return false;
 		}
 
-		public void RemoveExpiredItems()
+		private static void RemoveExpired(ZoneAddresses zone, DateTime utcNow)
 		{
-			DateTime utcNow = DateTime.UtcNow;
-
-			foreach (var kvp in _cache)
-			{
-				lock (kvp.Value)
-				{
-					HashSet<CacheValue>? tmp;
-
-					kvp.Value.RemoveWhere(x => x.ExpireDateUtc < utcNow);
-					if (kvp.Value.Count == 0)
-						_cache.TryRemove(kvp.Key, out tmp);
-				}
-			}
+			foreach (var expired in zone.ExpireDatesUtc.Where(x => x.Value <= utcNow).Select(x => x.Key).ToList())
+				zone.ExpireDatesUtc.Remove(expired);
 		}
 	}
 }
