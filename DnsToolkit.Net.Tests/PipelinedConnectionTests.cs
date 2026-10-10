@@ -10,10 +10,12 @@ namespace DnsToolkit.Net.Tests;
 /// </summary>
 public class PipelinedConnectionTests
 {
+	private static readonly DomainName _zone = DomainName.Parse("example.test");
+
 	[Fact]
 	public async Task ResponseReadBeforeTheClientWaitsForIt_IsDelivered()
 	{
-		var transport = new SimulatedTransport(answer: query => query.Questions[0].Name.Labels[0] == "fast");
+		var transport = new SimulatedTransport(query => query.Questions[0].Name.Labels[0] == "fast" ? new[] { Answer(query) } : Array.Empty<DnsMessage>());
 		using var client = new DnsClient(new[] { IPAddress.Loopback }, new IClientTransport[] { transport }, true, 1000);
 
 		// a query which is never answered keeps the receive loop of the pooled connection running
@@ -33,6 +35,55 @@ public class PipelinedConnectionTests
 		Assert.Null(await slow);
 	}
 
+	[Fact]
+	public async Task ZoneTransferMessages_ReadBeforeTheClientWaitsForThem_AreDelivered()
+	{
+		var transport = new SimulatedTransport(query => query.Questions[0].RecordType == RecordType.Axfr
+			? new[] { ZoneTransferMessage(query, Soa(), A("a")), ZoneTransferMessage(query, A("b")), ZoneTransferMessage(query, A("c"), Soa()) }
+			: Array.Empty<DnsMessage>());
+		using var client = new DnsClient(new[] { IPAddress.Loopback }, new IClientTransport[] { transport }, true, 1000);
+
+		// a query which is never answered keeps the receive loop of the pooled connection running
+		var slow = client.ResolveAsync(DomainName.Parse("slow.example.test"));
+		Assert.True(await transport.Connection.WaitForWaitingReceiveLoopAsync(TimeSpan.FromSeconds(5)), "The receive loop did not start");
+
+		// All messages of the zone transfer are read by the receive loop while the query is sent, so the follow-up
+		// messages arrive before the client asks for them. They used to be dropped, as only the first one had a receiver.
+		var stopwatch = Stopwatch.StartNew();
+		var response = await client.SendMessageAsync(ZoneTransferQuery());
+
+		Assert.NotNull(response);
+		Assert.Equal(new[] { RecordType.Soa, RecordType.A, RecordType.A, RecordType.A, RecordType.Soa }, response!.AnswerRecords.Select(r => r.RecordType));
+		Assert.InRange(stopwatch.Elapsed, TimeSpan.Zero, TimeSpan.FromMilliseconds(900));
+
+		Assert.Null(await slow);
+	}
+
+	private static DnsMessage Answer(DnsMessage query)
+	{
+		var response = query.CreateResponseInstance();
+		response.AnswerRecords.Add(new ARecord(query.Questions[0].Name, 60, IPAddress.Parse("192.0.2.1")));
+		return response;
+	}
+
+	private static DnsMessage ZoneTransferQuery()
+	{
+		var query = new DnsMessage();
+		query.Questions.Add(new DnsQuestion(_zone, RecordType.Axfr, RecordClass.INet));
+		return query;
+	}
+
+	private static DnsMessage ZoneTransferMessage(DnsMessage query, params DnsRecordBase[] records)
+	{
+		var response = query.CreateResponseInstance();
+		response.AnswerRecords.AddRange(records);
+		return response;
+	}
+
+	private static SoaRecord Soa() => new(_zone, 60, DomainName.Parse("ns.example.test"), DomainName.Parse("hostmaster.example.test"), 1, 3600, 600, 86400, 60);
+
+	private static ARecord A(string label) => new(DomainName.Parse(label + ".example.test"), 60, IPAddress.Parse("192.0.2.1"));
+
 	/// <summary>
 	///   A pipelined transport with one simulated connection
 	/// </summary>
@@ -40,10 +91,10 @@ public class PipelinedConnectionTests
 	{
 		private int _connectCount;
 
-		public SimulatedTransport(Func<DnsMessage, bool> answer)
+		public SimulatedTransport(Func<DnsMessage, IReadOnlyList<DnsMessage>> respond)
 			: base(53)
 		{
-			Connection = new SimulatedConnection(this, answer);
+			Connection = new SimulatedConnection(this, respond);
 		}
 
 		public SimulatedConnection Connection { get; }
@@ -60,20 +111,20 @@ public class PipelinedConnectionTests
 	}
 
 	/// <summary>
-	///   Answers the selected queries. The response is delivered while sending, and sending completes only after
-	///   the receive loop read the response, so the response is always read before the client waits for it.
+	///   Answers the queries with the given messages. The responses are delivered while sending, and sending completes only after
+	///   the receive loop read all of them, so the responses are always read before the client waits for them.
 	/// </summary>
 	private sealed class SimulatedConnection : IPipelineableClientConnection
 	{
-		private readonly Func<DnsMessage, bool> _answer;
+		private readonly Func<DnsMessage, IReadOnlyList<DnsMessage>> _respond;
 		private readonly ConcurrentQueue<(DnsReceivedRawPackage Package, TaskCompletionSource<bool> Read)> _responses = new();
 		private readonly SemaphoreSlim _available = new(0);
 		private readonly TaskCompletionSource<bool> _receiveLoopWaiting = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-		public SimulatedConnection(IClientTransport transport, Func<DnsMessage, bool> answer)
+		public SimulatedConnection(IClientTransport transport, Func<DnsMessage, IReadOnlyList<DnsMessage>> respond)
 		{
 			Transport = transport;
-			_answer = answer;
+			_respond = respond;
 		}
 
 		public IClientTransport Transport { get; }
@@ -90,19 +141,19 @@ public class PipelinedConnectionTests
 		public async Task<bool> SendAsync(DnsRawPackage package, CancellationToken token = default)
 		{
 			var query = DnsMessage.Parse(package.ToArraySegment(false));
-			if (!_answer(query))
-				return true;
+			var reads = new List<Task>();
 
-			var response = query.CreateResponseInstance();
-			response.AnswerRecords.Add(new ARecord(query.Questions[0].Name, 60, IPAddress.Parse("192.0.2.1")));
-			var responsePackage = new DnsReceivedRawPackage(response.Encode().ToArraySegment(true).ToArray(), new IPEndPoint(IPAddress.Loopback, 53), new IPEndPoint(IPAddress.Loopback, 50000));
+			foreach (var response in _respond(query))
+			{
+				var responsePackage = new DnsReceivedRawPackage(response.Encode().ToArraySegment(true).ToArray(), new IPEndPoint(IPAddress.Loopback, 53), new IPEndPoint(IPAddress.Loopback, 50000));
+				var read = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+				reads.Add(read.Task);
+				_responses.Enqueue((responsePackage, read));
+				_available.Release();
+			}
 
-			var read = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-			_responses.Enqueue((responsePackage, read));
-			_available.Release();
-
-			// sending completes only after the receive loop read the response
-			await Task.WhenAny(read.Task, Task.Delay(TimeSpan.FromSeconds(5)));
+			// sending completes only after the receive loop read all responses
+			await Task.WhenAny(Task.WhenAll(reads), Task.Delay(TimeSpan.FromSeconds(5)));
 			return true;
 		}
 

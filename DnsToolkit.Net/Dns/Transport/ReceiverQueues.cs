@@ -21,22 +21,23 @@ namespace DnsToolkit.Net.Dns;
 /// <summary>
 ///   The receivers of responses on a pipelined connection, grouped by the identification of the query.
 ///   Queries with the same identification (transaction id and question) are interchangeable, so their receivers
-///   are queued and served in the order of registration. Not thread safe, the caller has to lock.
+///   are kept in the order of registration. Not thread safe, the caller has to lock.
 /// </summary>
-internal sealed class ReceiverQueues
+internal sealed class ReceiverQueues<TReceiver>
+	where TReceiver : class
 {
-	private readonly Dictionary<DnsMessageIdentification, List<TaskCompletionSource<DnsReceivedRawPackage?>>> _queues = new();
+	private readonly Dictionary<DnsMessageIdentification, List<TReceiver>> _queues = new();
 
 	/// <summary>
 	///   The number of receivers of all identifications
 	/// </summary>
 	public int Count { get; private set; }
 
-	public void Add(DnsMessageIdentification identification, TaskCompletionSource<DnsReceivedRawPackage?> receiver)
+	public void Add(DnsMessageIdentification identification, TReceiver receiver)
 	{
 		if (!_queues.TryGetValue(identification, out var queue))
 		{
-			queue = new List<TaskCompletionSource<DnsReceivedRawPackage?>>(1);
+			queue = new List<TReceiver>(1);
 			_queues.Add(identification, queue);
 		}
 
@@ -45,24 +46,19 @@ internal sealed class ReceiverQueues
 	}
 
 	/// <summary>
-	///   Removes and returns the receiver registered first for the identification
+	///   Returns the receivers of the identification in the order of registration
 	/// </summary>
-	/// <returns>The receiver, or null if no receiver is registered for the identification</returns>
-	public TaskCompletionSource<DnsReceivedRawPackage?>? TakeFirst(DnsMessageIdentification identification)
+	/// <returns>The receivers, or an empty list if no receiver is registered for the identification</returns>
+	public IReadOnlyList<TReceiver> Get(DnsMessageIdentification identification)
 	{
-		if (!_queues.TryGetValue(identification, out var queue))
-			return null;
-
-		var receiver = queue[0];
-		RemoveAt(identification, queue, 0);
-		return receiver;
+		return _queues.TryGetValue(identification, out var queue) ? queue : Array.Empty<TReceiver>();
 	}
 
 	/// <summary>
 	///   Removes the given receiver
 	/// </summary>
 	/// <returns>True, if the receiver was registered</returns>
-	public bool Remove(DnsMessageIdentification identification, TaskCompletionSource<DnsReceivedRawPackage?> receiver)
+	public bool Remove(DnsMessageIdentification identification, TReceiver receiver)
 	{
 		if (!_queues.TryGetValue(identification, out var queue))
 			return false;
@@ -71,27 +67,23 @@ internal sealed class ReceiverQueues
 		if (index < 0)
 			return false;
 
-		RemoveAt(identification, queue, index);
+		queue.RemoveAt(index);
+		Count--;
+
+		if (queue.Count == 0)
+			_queues.Remove(identification);
+
 		return true;
 	}
 
 	/// <summary>
 	///   Removes and returns all receivers
 	/// </summary>
-	public List<TaskCompletionSource<DnsReceivedRawPackage?>> RemoveAll()
+	public List<TReceiver> RemoveAll()
 	{
 		var receivers = _queues.Values.SelectMany(x => x).ToList();
 		_queues.Clear();
 		Count = 0;
 		return receivers;
-	}
-
-	private void RemoveAt(DnsMessageIdentification identification, List<TaskCompletionSource<DnsReceivedRawPackage?>> queue, int index)
-	{
-		queue.RemoveAt(index);
-		Count--;
-
-		if (queue.Count == 0)
-			_queues.Remove(identification);
 	}
 }

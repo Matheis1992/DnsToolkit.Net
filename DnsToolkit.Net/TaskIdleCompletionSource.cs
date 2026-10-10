@@ -36,16 +36,14 @@ internal class TaskIdleCompletionSource : IDisposable
 
 	public Task Task => _tcs.Task;
 
-	public bool SetIdleTimeout(TimeSpan newIdleTimeout)
+	/// <summary>
+	///   Changes the idle timeout, which is used from the next <see cref="Start()" /> on. A running timer is not changed.
+	/// </summary>
+	public void ChangeIdleTimeout(TimeSpan newIdleTimeout)
 	{
 		lock (_tcs)
 		{
-			if (_tcs.Task.IsCompleted)
-				return false;
-
 			_timeout = newIdleTimeout;
-			_timer.Change(_timeout, Timeout.InfiniteTimeSpan);
-			return true;
 		}
 	}
 
@@ -64,10 +62,21 @@ internal class TaskIdleCompletionSource : IDisposable
 	{
 		lock (_tcs)
 		{
+			Start(_timeout);
+		}
+	}
+
+	/// <summary>
+	///   Starts the timer once with the given time instead of the idle timeout
+	/// </summary>
+	public void Start(TimeSpan dueTime)
+	{
+		lock (_tcs)
+		{
 			if (_tcs.Task.IsCompleted)
 				return;
 
-			_timer.Change(_timeout, Timeout.InfiniteTimeSpan);
+			_timer.Change(dueTime, Timeout.InfiniteTimeSpan);
 		}
 	}
 
