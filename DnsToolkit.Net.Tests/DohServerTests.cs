@@ -17,6 +17,10 @@ public class DohServerTests
 	private static readonly DomainName _name = DomainName.Parse("host.example.test");
 	private static readonly IPAddress _address = IPAddress.Parse("192.0.2.1");
 
+	// The servers listen on IPv4 only. With localhost the client tries IPv6 first, which takes about 2 seconds on Windows,
+	// so e.g. a query sent while the server stops could arrive only after it closed.
+	private const string Host = "127.0.0.1";
+
 	[Fact]
 	public async Task AnswersPostAndGetQueries()
 	{
@@ -28,7 +32,7 @@ public class DohServerTests
 		Assert.Equal(HttpStatusCode.OK, post.StatusCode);
 		AssertAnswer(await post.Content.ReadAsByteArrayAsync(), 0x1111);
 
-		var get = await http.GetAsync($"https://localhost:{port}/dns-query?dns={ToBase64Url(Query(0x2222))}");
+		var get = await http.GetAsync($"https://{Host}:{port}/dns-query?dns={ToBase64Url(Query(0x2222))}");
 		Assert.Equal(HttpStatusCode.OK, get.StatusCode);
 		AssertAnswer(await get.Content.ReadAsByteArrayAsync(), 0x2222);
 	}
@@ -41,7 +45,7 @@ public class DohServerTests
 		using var http = CreateHttpClient();
 
 		var query = LargeQuery(0x7777, 1000);
-		var response = await http.PostAsync($"https://localhost:{port}/dns-query", DnsContent(query));
+		var response = await http.PostAsync($"https://{Host}:{port}/dns-query", DnsContent(query));
 
 		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 		AssertAnswer(await response.Content.ReadAsByteArrayAsync(), 0x7777);
@@ -54,7 +58,7 @@ public class DohServerTests
 		using var server = StartServer(port);
 		using var http = CreateHttpClient();
 
-		var response = await http.GetAsync($"https://localhost:{port}/dns-query?dns={ToBase64Url(LargeQuery(0x8888, 3000))}");
+		var response = await http.GetAsync($"https://{Host}:{port}/dns-query?dns={ToBase64Url(LargeQuery(0x8888, 3000))}");
 
 		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 		AssertAnswer(await response.Content.ReadAsByteArrayAsync(), 0x8888);
@@ -77,7 +81,7 @@ public class DohServerTests
 		HttpResponseMessage response;
 		try
 		{
-			response = await http.PostAsync($"https://localhost:{port}/dns-query", content);
+			response = await http.PostAsync($"https://{Host}:{port}/dns-query", content);
 		}
 		catch (HttpRequestException)
 		{
@@ -95,7 +99,7 @@ public class DohServerTests
 		using var server = StartServer(port);
 		using var http = CreateHttpClient();
 
-		var response = await http.GetAsync($"https://localhost:{port}/dns-query?dns=");
+		var response = await http.GetAsync($"https://{Host}:{port}/dns-query?dns=");
 
 		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
 	}
@@ -123,7 +127,7 @@ public class DohServerTests
 			using var server = StartServer(port);
 			using var http = CreateHttpClient();
 
-			// AllowedHosts would reject the host name localhost
+			// AllowedHosts would reject the host 127.0.0.1
 			var response = await PostQueryAsync(http, port, 0x3333);
 			Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 			AssertAnswer(await response.Content.ReadAsByteArrayAsync(), 0x3333);
@@ -144,17 +148,77 @@ public class DohServerTests
 	{
 		var blocker = new TcpListener(IPAddress.Loopback, 0);
 		blocker.Start();
+		var endpoint = new IPEndPoint(IPAddress.Loopback, ((IPEndPoint) blocker.LocalEndpoint).Port);
+		using var transport = new HttpsServerTransport(LocalDnsServer.SharedCertificate, endpoint);
+
 		try
 		{
-			var endpoint = new IPEndPoint(IPAddress.Loopback, ((IPEndPoint) blocker.LocalEndpoint).Port);
-			using var transport = new HttpsServerTransport(LocalDnsServer.SharedCertificate, endpoint);
-
 			Assert.ThrowsAny<Exception>(() => transport.Bind());
 		}
 		finally
 		{
 			blocker.Stop();
 		}
+
+		// the failed bind does not leave the transport bound, so it can be bound once the port is free
+		transport.Bind();
+	}
+
+	[Fact]
+	public async Task Server_AnswersQueries_AfterRestart()
+	{
+		var port = LocalDnsServer.GetFreePort();
+		var server = new DnsServer(new HttpsServerTransport(LocalDnsServer.SharedCertificate, new HttpsServerTransportOptions { Address = IPAddress.Loopback, Port = port }));
+		server.QueryReceived += AnswerQuery;
+		using var http = CreateHttpClient();
+
+		try
+		{
+			server.Start();
+			var first = await PostQueryAsync(http, port, 0x5151);
+			Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+			AssertAnswer(await first.Content.ReadAsByteArrayAsync(), 0x5151);
+
+			await server.StopAsync();
+			server.Start();
+
+			// the requests of the second run are not rejected, although the queue of the first run was completed
+			var second = await PostQueryAsync(http, port, 0x5252);
+			Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+			AssertAnswer(await second.Content.ReadAsByteArrayAsync(), 0x5252);
+		}
+		finally
+		{
+			await ((IAsyncDisposable) server).DisposeAsync();
+		}
+	}
+
+	[Fact]
+	public async Task Transport_ThrowsInvalidOperation_WhenNotBound()
+	{
+		var port = LocalDnsServer.GetFreePort();
+		using var transport = new HttpsServerTransport(LocalDnsServer.SharedCertificate, new IPEndPoint(IPAddress.Loopback, port));
+
+		await Assert.ThrowsAsync<InvalidOperationException>(() => transport.AcceptConnectionAsync());
+
+		transport.Bind();
+		Assert.Throws<InvalidOperationException>(transport.Bind);
+
+		await transport.CloseAsync();
+		await Assert.ThrowsAsync<InvalidOperationException>(() => transport.AcceptConnectionAsync());
+
+		// closing again does nothing
+		await transport.CloseAsync();
+		transport.Close();
+	}
+
+	[Fact]
+	public void Transport_CannotBeBound_AfterDispose()
+	{
+		var transport = new HttpsServerTransport(LocalDnsServer.SharedCertificate, new IPEndPoint(IPAddress.Loopback, 0));
+		transport.Dispose();
+
+		Assert.Throws<ObjectDisposedException>(transport.Bind);
 	}
 
 	[Fact]
@@ -327,15 +391,13 @@ public class DohServerTests
 		using var http = CreateHttpClient();
 		try
 		{
-			// The server listens on IPv4 only. With localhost the client tries IPv6 first, which takes about 2 seconds
-			// on Windows, so the queued query could arrive only after the server closed.
-			var inProgress = PostQueryAsync(http, port, 0x1111, host: "127.0.0.1");
+			var inProgress = PostQueryAsync(http, port, 0x1111);
 			Assert.True(await Task.WhenAny(received.Task, Task.Delay(TimeSpan.FromSeconds(5))) == received.Task, "The query was not received");
 
 			var stopping = server.StopAsync();
 
 			// the server does not accept queries anymore, so this one waits in the queue of the transport
-			var queued = PostQueryAsync(http, port, 0x2222, host: "127.0.0.1");
+			var queued = PostQueryAsync(http, port, 0x2222);
 			await Task.Delay(500);
 			release.TrySetResult(true);
 
@@ -412,11 +474,11 @@ public class DohServerTests
 		return new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(10) };
 	}
 
-	private static Task<HttpResponseMessage> PostQueryAsync(HttpClient http, int port, ushort transactionId, string path = "dns-query", string host = "localhost")
+	private static Task<HttpResponseMessage> PostQueryAsync(HttpClient http, int port, ushort transactionId, string path = "dns-query")
 	{
 		var content = new ByteArrayContent(Query(transactionId));
 		content.Headers.ContentType = new MediaTypeHeaderValue("application/dns-message");
-		return http.PostAsync($"https://{host}:{port}/{path}", content);
+		return http.PostAsync($"https://{Host}:{port}/{path}", content);
 	}
 
 	private static byte[] Query(ushort transactionId)

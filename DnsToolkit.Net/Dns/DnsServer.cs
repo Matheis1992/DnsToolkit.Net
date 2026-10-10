@@ -56,6 +56,18 @@ namespace DnsToolkit.Net.Dns
 
 		private static readonly TimeSpan _stopTimeout = TimeSpan.FromSeconds(5);
 
+		// serializes starting and stopping
+		private readonly object _lifecycleLock = new();
+
+		private bool _isStarted;
+
+		// the stop of the current run, which all callers of Stop, StopAsync and Dispose wait for
+		private Task<bool>? _stopTask;
+
+		private int _isDisposed;
+
+		private bool IsDisposed => Volatile.Read(ref _isDisposed) != 0;
+
 		/// <summary>
 		///   Method that will be called to get the keydata for processing a tsig signed message
 		/// </summary>
@@ -84,9 +96,6 @@ namespace DnsToolkit.Net.Dns
 		}
 
 		/// <summary>
-		///   Starts the server
-		/// </summary>
-		/// <summary>
 		///   The maximum number of connections each transport processes at the same time. For UDP every query counts
 		///   as a connection. If the limit is reached, a transport accepts the next connection only after another one
 		///   was closed, so clients wait in the backlog of the operating system. The limit applies to each transport
@@ -107,26 +116,76 @@ namespace DnsToolkit.Net.Dns
 
 		private int _maxConcurrentConnectionsPerTransport = 1000;
 
+		/// <summary>
+		///   Starts the server. After it was stopped, it can be started again, if its transports can be bound again after
+		///   they were closed, like all transports of this library.
+		/// </summary>
+		/// <exception cref="ObjectDisposedException">The server was disposed</exception>
+		/// <exception cref="InvalidOperationException">The server is already started or still stopping</exception>
 		public void Start()
 		{
-			foreach (var transport in _transports)
+			lock (_lifecycleLock)
 			{
-				transport.Bind();
+				if (IsDisposed)
+					throw new ObjectDisposedException(GetType().FullName);
+
+				if (_isStarted)
+					throw new InvalidOperationException("The server is already started");
+
+				if (_stopTask is { IsCompleted: false })
+					throw new InvalidOperationException("The server is still stopping");
+
+				BindTransports();
+
+				_serverCancellationTokenSource = new CancellationTokenSource();
+				_abortCancellationTokenSource = new CancellationTokenSource();
+
+				var token = _serverCancellationTokenSource.Token;
+				var abortToken = _abortCancellationTokenSource.Token;
+				var maxConnections = MaxConcurrentConnectionsPerTransport;
+				_transportTasks = _transports.Select(t => Task.Run(() => ConnectionLoopAsync(t, maxConnections, token, abortToken))).ToArray();
+
+				_isStarted = true;
+				_stopTask = null;
 			}
+		}
 
-			_serverCancellationTokenSource = new CancellationTokenSource();
-			_abortCancellationTokenSource = new CancellationTokenSource();
+		/// <summary>
+		///   Binds all transports. If one of them fails, e.g. because its port is in use, the transports which were bound
+		///   already are closed again, so they do not keep their ports until the server is disposed.
+		/// </summary>
+		private void BindTransports()
+		{
+			for (var i = 0; i < _transports.Length; i++)
+			{
+				try
+				{
+					_transports[i].Bind();
+				}
+				catch
+				{
+					for (var bound = 0; bound < i; bound++)
+					{
+						try
+						{
+							_transports[bound].Close();
+						}
+						catch
+						{
+							// the exception of the failed transport is more relevant
+						}
+					}
 
-			var token = _serverCancellationTokenSource.Token;
-			var abortToken = _abortCancellationTokenSource.Token;
-			var maxConnections = MaxConcurrentConnectionsPerTransport;
-			_transportTasks = _transports.Select(t => Task.Run(() => ConnectionLoopAsync(t, maxConnections, token, abortToken))).ToArray();
+					throw;
+				}
+			}
 		}
 
 		/// <summary>
 		///   Stops the server gracefully: no further connections and queries are accepted, idle connections are closed
 		///   immediately and the queries in progress are answered, before the transports are closed. If this takes
-		///   longer than 5 seconds, the remaining connections are aborted.
+		///   longer than 5 seconds, the remaining connections are aborted. If the server is already stopping, it
+		///   waits for that stop.
 		/// </summary>
 		public void Stop()
 		{
@@ -145,7 +204,8 @@ namespace DnsToolkit.Net.Dns
 
 		/// <summary>
 		///   Stops the server gracefully: no further connections and queries are accepted, idle connections are closed
-		///   immediately and the queries in progress are answered, before the transports are closed.
+		///   immediately and the queries in progress are answered, before the transports are closed. If the server is
+		///   already stopping, it waits for that stop.
 		/// </summary>
 		/// <param name="token">
 		///   The token to indicate, that stopping should no longer be graceful. The remaining connections are aborted
@@ -159,25 +219,77 @@ namespace DnsToolkit.Net.Dns
 
 		private async Task StopCoreAsync(bool isAsync, CancellationToken token)
 		{
+			Task<bool> stopTask;
+			CancellationTokenSource abortCancellationTokenSource;
+
+			lock (_lifecycleLock)
+			{
+				_isStarted = false;
+				abortCancellationTokenSource = _abortCancellationTokenSource;
+
+				if (_stopTask == null)
+				{
+					// All callers wait for the same stop, so stopping concurrently or again does not close the transports twice.
+					// It is not started within the lock, as canceling the tokens runs the registered callbacks.
+					var serverCancellationTokenSource = _serverCancellationTokenSource;
+					var transportTasks = _transportTasks;
+					_stopTask = Task.Run(() => StopOnceAsync(isAsync, serverCancellationTokenSource, abortCancellationTokenSource, transportTasks));
+				}
+
+				stopTask = _stopTask;
+			}
+
+			bool isGraceful;
+
+			// the token of every caller can end the graceful stop
+			using (token.Register(() => TryCancel(abortCancellationTokenSource)))
+			{
+				isGraceful = await stopTask.ConfigureAwait(false);
+			}
+
+			if (!isGraceful)
+				token.ThrowIfCancellationRequested();
+		}
+
+		private async Task<bool> StopOnceAsync(bool isAsync, CancellationTokenSource serverCancellationTokenSource, CancellationTokenSource abortCancellationTokenSource, Task[] transportTasks)
+		{
 			// no further connections are accepted and no further queries are read, so idle connections are closed
-			_serverCancellationTokenSource.Cancel();
+			serverCancellationTokenSource.Cancel();
 
 			var isGraceful = false;
 			try
 			{
 				// the transports are still open, so the queries in progress can be answered
-				await WhenNoConnectionsAsync(_transportTasks, _activeConnections).WaitAsync(token).ConfigureAwait(false);
+				await WhenNoConnectionsAsync(transportTasks, _activeConnections).WaitAsync(abortCancellationTokenSource.Token).ConfigureAwait(false);
 				isGraceful = true;
+			}
+			catch (OperationCanceledException) when (abortCancellationTokenSource.IsCancellationRequested)
+			{
+				// a caller canceled its token, so stopping is no longer graceful
 			}
 			finally
 			{
 				if (!isGraceful)
 				{
-					_abortCancellationTokenSource.Cancel();
+					abortCancellationTokenSource.Cancel();
 					_activeConnections.DisposeAll();
 				}
 
-				await CloseTransportsAsync(isAsync, token).ConfigureAwait(false);
+				await CloseTransportsAsync(isAsync, abortCancellationTokenSource.Token).ConfigureAwait(false);
+			}
+
+			return isGraceful;
+		}
+
+		private static void TryCancel(CancellationTokenSource cancellationTokenSource)
+		{
+			try
+			{
+				cancellationTokenSource.Cancel();
+			}
+			catch (ObjectDisposedException)
+			{
+				// the server was disposed meanwhile, so it is stopped already
 			}
 		}
 
@@ -672,12 +784,18 @@ namespace DnsToolkit.Net.Dns
 		/// </summary>
 		void IDisposable.Dispose()
 		{
+			if (Interlocked.Exchange(ref _isDisposed, 1) != 0)
+				return;
+
+			// waits for a stop in progress as well, so nothing is disposed, which it still uses
 			Stop();
 
 			foreach (var transport in _transports)
 			{
 				transport.TryDispose();
 			}
+
+			DisposeCancellationTokenSources();
 		}
 
 		/// <summary>
@@ -685,6 +803,10 @@ namespace DnsToolkit.Net.Dns
 		/// </summary>
 		async ValueTask IAsyncDisposable.DisposeAsync()
 		{
+			if (Interlocked.Exchange(ref _isDisposed, 1) != 0)
+				return;
+
+			// waits for a stop in progress as well, so nothing is disposed, which it still uses
 			await StopAsync().ConfigureAwait(false);
 
 			foreach (var transport in _transports)
@@ -705,6 +827,18 @@ namespace DnsToolkit.Net.Dns
 					// like TryDispose, disposing must not fail
 				}
 			}
+
+			DisposeCancellationTokenSources();
+		}
+
+		/// <summary>
+		///   Disposed only together with the server, as the handlers of aborted queries can still use the tokens after stopping.
+		///   For the same reason the sources replaced by a restart are not disposed, they hold no timer or wait handle anyway.
+		/// </summary>
+		private void DisposeCancellationTokenSources()
+		{
+			_serverCancellationTokenSource.Dispose();
+			_abortCancellationTokenSource.Dispose();
 		}
 	}
 }

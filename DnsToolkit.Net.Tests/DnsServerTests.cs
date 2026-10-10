@@ -289,6 +289,259 @@ public class DnsServerTests
 	}
 
 	[Fact]
+	public void Dispose_Twice_StopsAndDisposesOnlyOnce()
+	{
+		var transport = new FakeServerTransport();
+		var server = new DnsServer(transport);
+		server.Start();
+
+		((IDisposable) server).Dispose();
+		var exception = Record.Exception(() => ((IDisposable) server).Dispose());
+
+		Assert.Null(exception);
+		Assert.Equal(1, transport.CloseCalls);
+		Assert.Equal(1, transport.DisposeCalls);
+	}
+
+	[Fact]
+	public async Task DisposeAsync_Twice_StopsAndDisposesOnlyOnce()
+	{
+		var transport = new FakeServerTransport();
+		var server = new DnsServer(transport);
+		server.Start();
+
+		await CompletesWithinAsync(((IAsyncDisposable) server).DisposeAsync().AsTask(), TimeSpan.FromSeconds(5));
+		await CompletesWithinAsync(((IAsyncDisposable) server).DisposeAsync().AsTask(), TimeSpan.FromSeconds(5));
+		((IDisposable) server).Dispose();
+
+		Assert.Equal(1, transport.CloseCalls);
+		Assert.Equal(1, transport.DisposeCalls);
+	}
+
+	[Fact]
+	public async Task Stop_AfterDispose_DoesNotStopAgain()
+	{
+		var transport = new FakeServerTransport();
+		var server = new DnsServer(transport);
+		server.Start();
+		((IDisposable) server).Dispose();
+
+		var exception = Record.Exception(server.Stop);
+		await CompletesWithinAsync(server.StopAsync(), TimeSpan.FromSeconds(5));
+
+		Assert.Null(exception);
+		Assert.Equal(1, transport.CloseCalls);
+	}
+
+	[Fact]
+	public void Start_AfterDispose_Throws()
+	{
+		var transport = new FakeServerTransport();
+		var server = new DnsServer(transport);
+		((IDisposable) server).Dispose();
+
+		Assert.Throws<ObjectDisposedException>(server.Start);
+	}
+
+	[Fact]
+	public async Task StopAndStopAsync_Concurrently_WaitForTheSameStop()
+	{
+		var (server, transport, connection, handler) = await StartWithQueryInProgressAsync();
+
+		try
+		{
+			var stops = new[] { server.StopAsync(), Task.Run(server.Stop), server.StopAsync() };
+			Assert.False(await Task.WhenAny(Task.WhenAll(stops), Task.Delay(300)) == Task.WhenAll(stops), "A stop ended while a query was processed");
+
+			handler.Release();
+
+			await CompletesWithinAsync(Task.WhenAll(stops), TimeSpan.FromSeconds(5));
+			Assert.Equal(1, connection.SentPackages);
+			Assert.Equal(1, transport.CloseCalls);
+		}
+		finally
+		{
+			handler.Release();
+		}
+	}
+
+	[Fact]
+	public async Task Dispose_WhileStopping_WaitsForTheStop_BeforeDisposingTheTransports()
+	{
+		var (server, transport, connection, handler) = await StartWithQueryInProgressAsync();
+
+		try
+		{
+			var stopping = server.StopAsync();
+			var disposing = Task.Run(() => ((IDisposable) server).Dispose());
+
+			Assert.False(await Task.WhenAny(disposing, Task.Delay(300)) == disposing, "The server was disposed while it was stopping");
+			Assert.Equal(0, transport.DisposeCalls);
+
+			handler.Release();
+
+			await CompletesWithinAsync(Task.WhenAll(stopping, disposing), TimeSpan.FromSeconds(5));
+			await stopping;
+			await disposing;
+			Assert.Equal(1, connection.SentPackages);
+			Assert.Equal(1, transport.CloseCalls);
+			Assert.Equal(1, transport.DisposeCalls);
+		}
+		finally
+		{
+			handler.Release();
+		}
+	}
+
+	[Fact]
+	public async Task StopAsync_TokenOfAnyCaller_AbortsTheSharedStop()
+	{
+		var (server, transport, connection, handler) = await StartWithQueryInProgressAsync();
+
+		try
+		{
+			var graceful = server.StopAsync();
+
+			using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+			var impatient = server.StopAsync(cts.Token);
+
+			// only the caller, whose token was canceled, is told that the stop was not graceful
+			await Assert.ThrowsAnyAsync<OperationCanceledException>(() => CompletesWithinAsync(impatient, TimeSpan.FromSeconds(5)));
+			await CompletesWithinAsync(graceful, TimeSpan.FromSeconds(5));
+
+			Assert.True(await connection.WaitForDisposeAsync(TimeSpan.Zero), "The connection was not aborted");
+			Assert.Equal(0, connection.SentPackages);
+			Assert.Equal(1, transport.CloseCalls);
+		}
+		finally
+		{
+			handler.Release();
+		}
+	}
+
+	[Fact]
+	public async Task Start_WhileStartedOrStopping_Throws()
+	{
+		var (server, transport, _, handler) = await StartWithQueryInProgressAsync();
+
+		try
+		{
+			Assert.Throws<InvalidOperationException>(server.Start);
+
+			var stopping = server.StopAsync();
+			Assert.Throws<InvalidOperationException>(server.Start);
+
+			handler.Release();
+			await CompletesWithinAsync(stopping, TimeSpan.FromSeconds(5));
+			Assert.Equal(1, transport.BindCalls);
+		}
+		finally
+		{
+			handler.Release();
+		}
+	}
+
+	[Fact]
+	public async Task Start_AfterStop_StartsAgain()
+	{
+		var transport = new FakeServerTransport();
+		var server = new DnsServer(transport);
+
+		server.Start();
+		await CompletesWithinAsync(server.StopAsync(), TimeSpan.FromSeconds(5));
+		server.Start();
+		await CompletesWithinAsync(server.StopAsync(), TimeSpan.FromSeconds(5));
+
+		Assert.Equal(2, transport.BindCalls);
+		Assert.Equal(2, transport.CloseCalls);
+	}
+
+	[Fact]
+	public void Start_WhenATransportFailsToBind_ClosesTheTransportsBoundAlready()
+	{
+		var bound = new FakeServerTransport();
+		var failing = new FakeServerTransport(throwOnBind: true);
+		var notBound = new FakeServerTransport();
+		var server = new DnsServer(bound, failing, notBound);
+
+		var exception = Assert.Throws<SocketException>(server.Start);
+
+		Assert.Equal(SocketError.AddressAlreadyInUse, exception.SocketErrorCode);
+		Assert.Equal(1, bound.CloseCalls);
+		Assert.Equal(0, failing.CloseCalls);
+		Assert.Equal(0, notBound.BindCalls);
+
+		// the server was not started, so starting is tried again instead of failing as already started
+		Assert.Throws<SocketException>(server.Start);
+	}
+
+	[Fact]
+	public void Start_WhenUdpPortIsInUse_ReleasesTheTcpPortAgain()
+	{
+		var (udpBlocker, endpoint) = BlockUdpPortWithFreeTcpPort();
+
+		using (udpBlocker)
+		{
+			var server = new DnsServer(new TcpServerTransport(endpoint), new UdpServerTransport(endpoint));
+
+			try
+			{
+				var exception = Assert.Throws<SocketException>(server.Start);
+				Assert.Equal(SocketError.AddressAlreadyInUse, exception.SocketErrorCode);
+
+				var listener = new TcpListener(endpoint);
+				listener.Start();
+				listener.Stop();
+			}
+			finally
+			{
+				((IDisposable) server).Dispose();
+			}
+		}
+	}
+
+	/// <summary>
+	///   Binds a UDP port on loopback, whose TCP port with the same number is free
+	/// </summary>
+	private static (UdpClient UdpBlocker, IPEndPoint EndPoint) BlockUdpPortWithFreeTcpPort()
+	{
+		for (var attempt = 0; ; attempt++)
+		{
+			var udpBlocker = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+			var endpoint = new IPEndPoint(IPAddress.Loopback, ((IPEndPoint) udpBlocker.Client.LocalEndPoint!).Port);
+
+			try
+			{
+				var probe = new TcpListener(endpoint);
+				probe.Start();
+				probe.Stop();
+				return (udpBlocker, endpoint);
+			}
+			catch (SocketException) when (attempt < 10)
+			{
+				udpBlocker.Dispose();
+			}
+		}
+	}
+
+	/// <summary>
+	///   Starts a server, whose transport delivers a single query, which is processed until the handler is released
+	/// </summary>
+	private static async Task<(DnsServer Server, FakeServerTransport Transport, FakeServerConnection Connection, BlockingQueryHandler Handler)> StartWithQueryInProgressAsync()
+	{
+		var handler = new BlockingQueryHandler();
+		var connection = new FakeServerConnection(CreateQueryPackage());
+		var transport = new FakeServerTransport(connection);
+
+		var server = new DnsServer(transport);
+		server.QueryReceived += handler.HandleAsync;
+		server.Start();
+
+		Assert.True(await handler.WaitForQueryAsync(TimeSpan.FromSeconds(5)), "The query was not received");
+		return (server, transport, connection, handler);
+	}
+
+	[Fact]
 	public async Task DisposeAsync_DisposesTransportsAsynchronously()
 	{
 		var plain = new FakeServerTransport();
@@ -389,13 +642,62 @@ public class DnsServerTests
 		return query.Encode().ToArraySegment(withLengthPrefix).ToArray();
 	}
 
+	[Fact]
+	public async Task Server_WithUdpAndTcp_AnswersQueries_AfterRestart()
+	{
+		var (server, port) = StartServer(endpoint => new IServerTransport[] { new UdpServerTransport(endpoint), new TcpServerTransport(endpoint) }, AnswerQuery);
+
+		try
+		{
+			await AssertUdpAndTcpAreAnsweredAsync(port, 0x7171);
+
+			await CompletesWithinAsync(server.StopAsync(), TimeSpan.FromSeconds(5));
+			server.Start();
+
+			await AssertUdpAndTcpAreAnsweredAsync(port, 0x7272);
+		}
+		finally
+		{
+			((IDisposable) server).Dispose();
+		}
+	}
+
+	private static async Task AssertUdpAndTcpAreAnsweredAsync(int port, ushort transactionId)
+	{
+		using (var udpClient = new UdpClient(AddressFamily.InterNetwork))
+		{
+			udpClient.Connect(IPAddress.Loopback, port);
+			var query = EncodeQuery(transactionId, withLengthPrefix: false);
+			await udpClient.SendAsync(query, query.Length);
+
+			var receive = udpClient.ReceiveAsync();
+			Assert.True(await Task.WhenAny(receive, Task.Delay(TimeSpan.FromSeconds(5))) == receive, "The UDP query was not answered");
+			Assert.Equal(transactionId, DnsMessage.Parse(new ArraySegment<byte>((await receive).Buffer)).TransactionID);
+		}
+
+		using (var tcpClient = new TcpClient())
+		{
+			await tcpClient.ConnectAsync(IPAddress.Loopback, port);
+			var stream = tcpClient.GetStream();
+			var query = EncodeQuery(transactionId, withLengthPrefix: true);
+			await stream.WriteAsync(query, 0, query.Length);
+
+			Assert.Equal(transactionId, (await TcpTransportTests.ReadResponseAsync(stream)).TransactionID);
+		}
+	}
+
 	private static (DnsServer Server, int Port) StartServer(Func<IPEndPoint, IServerTransport> createTransport, AsyncEventHandler<QueryReceivedEventArgs> handler)
+	{
+		return StartServer(endpoint => new[] { createTransport(endpoint) }, handler);
+	}
+
+	private static (DnsServer Server, int Port) StartServer(Func<IPEndPoint, IServerTransport[]> createTransports, AsyncEventHandler<QueryReceivedEventArgs> handler)
 	{
 		// another process may take the free port before the server binds it
 		for (var attempt = 1;; attempt++)
 		{
 			var port = LocalDnsServer.GetFreePort();
-			var server = new DnsServer(createTransport(new IPEndPoint(IPAddress.Loopback, port)));
+			var server = new DnsServer(createTransports(new IPEndPoint(IPAddress.Loopback, port)));
 			server.QueryReceived += handler;
 
 			try
@@ -463,20 +765,25 @@ public class DnsServerTests
 		private bool _throwOnNextAccept;
 		private bool _connectionDelivered;
 		private int _acceptCalls;
+		private int _bindCalls;
 		private int _closeCalls;
 		private int _disposeCalls;
 
 		private int _remainingFailedAccepts;
+		private readonly bool _throwOnBind;
 
-		public FakeServerTransport(FakeServerConnection? connection = null, bool alwaysReturnNull = false, bool throwOnFirstAccept = false, int failedAcceptsBeforeConnection = 0)
+		public FakeServerTransport(FakeServerConnection? connection = null, bool alwaysReturnNull = false, bool throwOnFirstAccept = false, int failedAcceptsBeforeConnection = 0, bool throwOnBind = false)
 		{
 			_connection = connection;
 			_alwaysReturnNull = alwaysReturnNull;
 			_throwOnNextAccept = throwOnFirstAccept;
 			_remainingFailedAccepts = failedAcceptsBeforeConnection;
+			_throwOnBind = throwOnBind;
 		}
 
 		public int AcceptCalls => Volatile.Read(ref _acceptCalls);
+
+		public int BindCalls => Volatile.Read(ref _bindCalls);
 
 		public int CloseCalls => Volatile.Read(ref _closeCalls);
 
@@ -487,7 +794,13 @@ public class DnsServerTests
 		public bool AllowTruncatedResponses => false;
 		public TransportProtocol TransportProtocol => TransportProtocol.Tcp;
 
-		public void Bind() { }
+		public void Bind()
+		{
+			Interlocked.Increment(ref _bindCalls);
+
+			if (_throwOnBind)
+				throw new SocketException((int) SocketError.AddressAlreadyInUse);
+		}
 
 		public void Close() => Interlocked.Increment(ref _closeCalls);
 

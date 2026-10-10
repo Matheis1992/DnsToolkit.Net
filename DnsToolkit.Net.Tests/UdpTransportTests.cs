@@ -64,6 +64,76 @@ public class UdpTransportTests
 		Assert.Contains(response.AnswerRecords.OfType<ARecord>(), a => a.Address.Equals(_address));
 	}
 
+	[Fact]
+	public async Task Transport_CanBeBoundAgain_AfterClose()
+	{
+		var endpoint = new IPEndPoint(IPAddress.Loopback, GetFreeUdpPort());
+		using var transport = new UdpServerTransport(endpoint);
+
+		transport.Bind();
+		transport.Close();
+		transport.Bind();
+
+		using var client = new UdpClient(AddressFamily.InterNetwork);
+		var query = Query(0x4444);
+		await client.SendAsync(query, query.Length, endpoint);
+
+		var connection = await AcceptAsync(transport);
+		Assert.NotNull(connection);
+		Assert.Equal(0x4444, (await connection!.ReceiveAsync())!.MessageIdentification.TransactionID);
+	}
+
+	[Fact]
+	public async Task Transport_CanBeBound_AfterBindFailedBecausePortWasInUse()
+	{
+		var endpoint = new IPEndPoint(IPAddress.Loopback, GetFreeUdpPort());
+		using var transport = new UdpServerTransport(endpoint);
+
+		using (var blocker = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
+		{
+			blocker.Bind(endpoint);
+			var exception = Assert.Throws<SocketException>(transport.Bind);
+			Assert.Equal(SocketError.AddressAlreadyInUse, exception.SocketErrorCode);
+		}
+
+		transport.Bind();
+
+		using var client = new UdpClient(AddressFamily.InterNetwork);
+		var query = Query(0x5555);
+		await client.SendAsync(query, query.Length, endpoint);
+
+		var connection = await AcceptAsync(transport);
+		Assert.NotNull(connection);
+		Assert.Equal(0x5555, (await connection!.ReceiveAsync())!.MessageIdentification.TransactionID);
+	}
+
+	[Fact]
+	public async Task Transport_ThrowsInvalidOperation_WhenNotBound()
+	{
+		var endpoint = new IPEndPoint(IPAddress.Loopback, GetFreeUdpPort());
+		using var transport = new UdpServerTransport(endpoint);
+
+		await Assert.ThrowsAsync<InvalidOperationException>(() => transport.AcceptConnectionAsync());
+
+		transport.Bind();
+		Assert.Throws<InvalidOperationException>(transport.Bind);
+
+		transport.Close();
+		await Assert.ThrowsAsync<InvalidOperationException>(() => transport.AcceptConnectionAsync());
+
+		// closing again does nothing
+		transport.Close();
+	}
+
+	[Fact]
+	public void Transport_CannotBeBound_AfterDispose()
+	{
+		var transport = new UdpServerTransport(new IPEndPoint(IPAddress.Loopback, 0));
+		transport.Dispose();
+
+		Assert.Throws<ObjectDisposedException>(transport.Bind);
+	}
+
 	private static async Task<IServerConnection?> AcceptAsync(UdpServerTransport transport)
 	{
 		using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
