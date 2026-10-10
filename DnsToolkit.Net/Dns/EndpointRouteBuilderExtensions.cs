@@ -30,6 +30,11 @@ public static class EndpointRouteBuilderExtensions
 
 	internal delegate Task<DnsRawPackage?> DnsRawPackageDelegate(DnsReceivedRawPackage query, HttpContext context, CancellationToken token);
 
+	/// <summary>
+	///   Thrown by a <see cref="DnsRawPackageDelegate" />, if the server does not accept queries anymore, e.g. because it is stopping
+	/// </summary>
+	internal sealed class ServiceUnavailableException : Exception { }
+
 	public static IEndpointConventionBuilder MapDnsOverHttps(
 		this IEndpointRouteBuilder endpoints,
 		DnsHttpsRequestDelegate handler)
@@ -182,7 +187,17 @@ public static class EndpointRouteBuilderExtensions
 		DnsMessageBase.EncodeUShort(content, 0, (ushort) (content.Length - 2));
 		var receivedPackage = new DnsReceivedRawPackage(content, remoteEndpoint, localEndpoint);
 
-		var response = await handler(receivedPackage, ctx, token);
+		DnsRawPackage? response;
+		try
+		{
+			response = await handler(receivedPackage, ctx, token);
+		}
+		catch (ServiceUnavailableException)
+		{
+			// the client can retry immediately, e.g. with another server
+			await Results.StatusCode((int) HttpStatusCode.ServiceUnavailable).ExecuteAsync(ctx);
+			return;
+		}
 
 		if (response == null)
 		{

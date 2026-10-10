@@ -31,7 +31,7 @@ using Microsoft.Extensions.Logging;
 
 namespace DnsToolkit.Net.Dns;
 
-public class HttpsServerTransport : IServerTransport
+public class HttpsServerTransport : IAsyncClosableServerTransport, IAsyncDisposable
 {
 	private readonly WebApplication _app;
 
@@ -110,15 +110,45 @@ public class HttpsServerTransport : IServerTransport
 
 	private async Task<DnsRawPackage?> HandleRequest(DnsReceivedRawPackage query, HttpContext context, CancellationToken token)
 	{
-		var tcs = new TaskCompletionSource<DnsRawPackage?>();
+		var tcs = new TaskCompletionSource<DnsRawPackage?>(TaskCreationOptions.RunContinuationsAsynchronously);
 		var connection = new HttpsServerConnection(this, query, tcs);
-		await _connectionQueue.Writer.WriteAsync(connection, token);
+
+		// the queue is unbounded, so writing only fails once the transport is closing
+		if (!_connectionQueue.Writer.TryWrite(connection))
+			throw new EndpointRouteBuilderExtensions.ServiceUnavailableException();
+
 		return await tcs.Task.WaitAsync(token);
+	}
+
+	/// <summary>
+	///   Rejects the requests, which were not passed to the server yet, and all further requests. Otherwise they would wait
+	///   until the shutdown timeout of the web server, as the server does not accept connections anymore when it is stopping.
+	/// </summary>
+	private void RejectQueuedRequests()
+	{
+		_connectionQueue.Writer.TryComplete();
+
+		while (_connectionQueue.Reader.TryRead(out var connection))
+		{
+			connection.Reject();
+		}
 	}
 
 	public void Dispose()
 	{
 		_app.TryDispose();
+	}
+
+	public async ValueTask DisposeAsync()
+	{
+		try
+		{
+			await _app.DisposeAsync().ConfigureAwait(false);
+		}
+		catch
+		{
+			// like TryDispose, disposing must not fail
+		}
 	}
 
 	public ushort DefaultAllowedResponseSize => ushort.MaxValue;
@@ -136,11 +166,24 @@ public class HttpsServerTransport : IServerTransport
 	}
 
 	/// <summary>
-	///   Stops the web server, requests in progress get up to 5 seconds to complete
+	///   Stops the web server. The requests, which were not passed to the server yet, are rejected with 503 Service Unavailable.
+	///   The requests in progress get up to the shutdown timeout to complete.
 	/// </summary>
 	public void Close()
 	{
+		RejectQueuedRequests();
 		_app.StopAsync().GetAwaiter().GetResult();
+	}
+
+	/// <summary>
+	///   Stops the web server. The requests, which were not passed to the server yet, are rejected with 503 Service Unavailable.
+	///   The requests in progress get up to the shutdown timeout to complete.
+	/// </summary>
+	/// <param name="token">The token to indicate, that stopping should no longer be graceful</param>
+	public async Task CloseAsync(CancellationToken token = default)
+	{
+		RejectQueuedRequests();
+		await _app.StopAsync(token).ConfigureAwait(false);
 	}
 
 	public async Task<IServerConnection?> AcceptConnectionAsync(CancellationToken token = default)
@@ -164,6 +207,11 @@ public class HttpsServerTransport : IServerTransport
 		public void Dispose()
 		{
 			_tcs.TrySetResult(null);
+		}
+
+		public void Reject()
+		{
+			_tcs.TrySetException(new EndpointRouteBuilderExtensions.ServiceUnavailableException());
 		}
 
 		public IServerTransport Transport { get; }

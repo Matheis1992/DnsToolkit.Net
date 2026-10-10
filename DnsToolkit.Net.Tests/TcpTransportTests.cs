@@ -147,7 +147,7 @@ public class TcpTransportTests
 		return query.Encode().ToArraySegment(true).ToArray();
 	}
 
-	private static async Task<DnsMessage> ReadResponseAsync(Stream stream)
+	internal static async Task<DnsMessage> ReadResponseAsync(Stream stream)
 	{
 		using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
 		var header = await ReadExactAsync(stream, 2, cts.Token);

@@ -202,11 +202,26 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 				var remoteEndPoint = RemoteEndPoint;
 				var localEndPoint = LocalEndPoint;
 
-				// wait up to the keep alive for the next query, and up to the timeout for the rest of it
-				var message = await _messageStream.ReadMessageAsync(
+				// Wait up to the keep alive for the next query, and up to the timeout for the rest of it.
+				// The read itself is not canceled by the token, as canceling closes the stream, but the responses
+				// to the queries in progress still have to be sent when the server stops.
+				var read = _messageStream.ReadMessageAsync(
 					DnsTcpMessageStream.ToTimeout(TransportInternal.KeepAlive),
 					DnsTcpMessageStream.ToTimeout(TransportInternal.Timeout),
-					token);
+					CancellationToken.None);
+
+				byte[]? message;
+				try
+				{
+					message = await read.WaitAsync(token);
+				}
+				catch (OperationCanceledException) when (token.IsCancellationRequested)
+				{
+					// The read ends when the connection is disposed, after the responses were sent.
+					// A query, which is received meanwhile, is not processed anymore.
+					_ = read.ContinueWith(t => t.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+					return null;
+				}
 
 				return message == null ? null : new DnsReceivedRawPackage(message, remoteEndPoint, localEndPoint);
 			}

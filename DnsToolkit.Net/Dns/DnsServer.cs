@@ -31,7 +31,7 @@ namespace DnsToolkit.Net.Dns
 	/// <summary>
 	///   Provides a base dns server interface
 	/// </summary>
-	public class DnsServer : IDisposable
+	public class DnsServer : IDisposable, IAsyncDisposable
 	{
 		/// <summary>
 		///   Represents the method, that will be called to get the keydata for processing a tsig signed message
@@ -46,7 +46,15 @@ namespace DnsToolkit.Net.Dns
 
 		private readonly IServerTransport[] _transports;
 		private Task[] _transportTasks = Array.Empty<Task>();
+		// canceled when stopping: no further connections are accepted and no further queries are read
 		private CancellationTokenSource _serverCancellationTokenSource = new();
+
+		// canceled when stopping is no longer graceful: the responses to the queries in progress are not sent anymore
+		private CancellationTokenSource _abortCancellationTokenSource = new();
+
+		private readonly ActiveConnections _activeConnections = new();
+
+		private static readonly TimeSpan _stopTimeout = TimeSpan.FromSeconds(5);
 
 		/// <summary>
 		///   Method that will be called to get the keydata for processing a tsig signed message
@@ -107,29 +115,154 @@ namespace DnsToolkit.Net.Dns
 			}
 
 			_serverCancellationTokenSource = new CancellationTokenSource();
+			_abortCancellationTokenSource = new CancellationTokenSource();
 
 			var token = _serverCancellationTokenSource.Token;
+			var abortToken = _abortCancellationTokenSource.Token;
 			var maxConnections = MaxConcurrentConnectionsPerTransport;
-			_transportTasks = _transports.Select(t => Task.Run(() => ConnectionLoopAsync(t, maxConnections, token))).ToArray();
+			_transportTasks = _transports.Select(t => Task.Run(() => ConnectionLoopAsync(t, maxConnections, token, abortToken))).ToArray();
 		}
 
 		/// <summary>
-		///   Stops the server
+		///   Stops the server gracefully: no further connections and queries are accepted, idle connections are closed
+		///   immediately and the queries in progress are answered, before the transports are closed. If this takes
+		///   longer than 5 seconds, the remaining connections are aborted.
 		/// </summary>
 		public void Stop()
 		{
-			_serverCancellationTokenSource.Cancel();
+			using var timeoutCts = new CancellationTokenSource(_stopTimeout);
 
-			// Closing the transports also aborts pending accepts of transports, which do not observe the cancellation token
-			foreach (var transport in _transports)
+			try
 			{
-				transport.Close();
+				// The stop does not continue on the context of the caller, so blocking here cannot deadlock
+				StopCoreAsync(isAsync: false, timeoutCts.Token).GetAwaiter().GetResult();
 			}
-
-			Task.WaitAll(_transportTasks, TimeSpan.FromSeconds(5));
+			catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
+			{
+				// the remaining connections were aborted
+			}
 		}
 
-		private async Task ConnectionLoopAsync(IServerTransport transport, int maxConnections, CancellationToken token)
+		/// <summary>
+		///   Stops the server gracefully: no further connections and queries are accepted, idle connections are closed
+		///   immediately and the queries in progress are answered, before the transports are closed.
+		/// </summary>
+		/// <param name="token">
+		///   The token to indicate, that stopping should no longer be graceful. The remaining connections are aborted
+		///   then and the transports are closed immediately.
+		/// </param>
+		/// <exception cref="OperationCanceledException">The token was canceled, so the server was not stopped gracefully</exception>
+		public Task StopAsync(CancellationToken token = default)
+		{
+			return StopCoreAsync(isAsync: true, token);
+		}
+
+		private async Task StopCoreAsync(bool isAsync, CancellationToken token)
+		{
+			// no further connections are accepted and no further queries are read, so idle connections are closed
+			_serverCancellationTokenSource.Cancel();
+
+			var isGraceful = false;
+			try
+			{
+				// the transports are still open, so the queries in progress can be answered
+				await WhenNoConnectionsAsync(_transportTasks, _activeConnections).WaitAsync(token).ConfigureAwait(false);
+				isGraceful = true;
+			}
+			finally
+			{
+				if (!isGraceful)
+				{
+					_abortCancellationTokenSource.Cancel();
+					_activeConnections.DisposeAll();
+				}
+
+				await CloseTransportsAsync(isAsync, token).ConfigureAwait(false);
+			}
+		}
+
+		private static async Task WhenNoConnectionsAsync(Task[] transportTasks, ActiveConnections activeConnections)
+		{
+			// no connection is added after the connection loops ended
+			await Task.WhenAll(transportTasks).ConfigureAwait(false);
+			await activeConnections.WhenNoneAsync().ConfigureAwait(false);
+		}
+
+		private async Task CloseTransportsAsync(bool isAsync, CancellationToken token)
+		{
+			foreach (var transport in _transports)
+			{
+				if (isAsync && (transport is IAsyncClosableServerTransport asyncTransport))
+				{
+					await asyncTransport.CloseAsync(token).ConfigureAwait(false);
+				}
+				else
+				{
+					transport.Close();
+				}
+			}
+		}
+
+		/// <summary>
+		///   The connections in progress of all transports
+		/// </summary>
+		private sealed class ActiveConnections
+		{
+			private readonly HashSet<IServerConnection> _connections = new();
+			private TaskCompletionSource<bool>? _none;
+
+			public void Add(IServerConnection connection)
+			{
+				lock (_connections)
+				{
+					_connections.Add(connection);
+				}
+			}
+
+			public void Remove(IServerConnection connection)
+			{
+				TaskCompletionSource<bool>? none = null;
+
+				lock (_connections)
+				{
+					if (_connections.Remove(connection) && (_connections.Count == 0))
+					{
+						none = _none;
+						_none = null;
+					}
+				}
+
+				none?.TrySetResult(true);
+			}
+
+			public Task WhenNoneAsync()
+			{
+				lock (_connections)
+				{
+					if (_connections.Count == 0)
+						return Task.CompletedTask;
+
+					return (_none ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
+				}
+			}
+
+			/// <summary>
+			///   Aborts all connections, so pending reads and writes end. The connections are removed once their processing ended.
+			/// </summary>
+			public void DisposeAll()
+			{
+				List<IServerConnection> connections;
+				lock (_connections)
+				{
+					connections = _connections.ToList();
+				}
+
+				foreach (var connection in connections)
+					connection.TryDispose();
+			}
+		}
+
+		private async Task ConnectionLoopAsync(IServerTransport transport, int maxConnections, CancellationToken token, CancellationToken abortToken)
 		{
 			var failedAcceptCount = 0;
 
@@ -186,8 +319,15 @@ namespace DnsToolkit.Net.Dns
 
 				failedAcceptCount = 0;
 
+				// tracked until it is disposed, so stopping the server can wait for it or abort it
+				_activeConnections.Add(connection);
+
 				// Not bound to the token, as the connection has to be disposed and its slot released in any case
-				_ = Task.Run(() => ProcessConnectionAsync(connection, () => connectionSlots.Release(), token));
+				_ = Task.Run(() => ProcessConnectionAsync(connection, () =>
+				{
+					connectionSlots.Release();
+					_activeConnections.Remove(connection);
+				}, token, abortToken));
 			}
 		}
 
@@ -235,7 +375,7 @@ namespace DnsToolkit.Net.Dns
 			}
 		}
 
-		private async Task ProcessConnectionAsync(IServerConnection connection, Action onDisposed, CancellationToken token)
+		private async Task ProcessConnectionAsync(IServerConnection connection, Action onDisposed, CancellationToken token, CancellationToken abortToken)
 		{
 			// The receive loop holds one reference and every query in progress holds another one,
 			// so the connection is disposed after the loop ended and all queries are answered
@@ -262,8 +402,9 @@ namespace DnsToolkit.Net.Dns
 
 					refCount.Increment();
 
-					// Not bound to the token, as ProcessRawPackageAsync has to release its reference in any case
-					_ = Task.Run(() => ProcessRawPackageAsync(connection, queryPackage, refCount, token));
+					// Not bound to a token, as ProcessRawPackageAsync has to release its reference in any case.
+					// It sends the response also while the server is stopping, only aborting the stop cancels it.
+					_ = Task.Run(() => ProcessRawPackageAsync(connection, queryPackage, refCount, abortToken));
 				}
 			}
 			catch (Exception ex)
@@ -276,7 +417,7 @@ namespace DnsToolkit.Net.Dns
 			}
 		}
 
-		private async Task ProcessRawPackageAsync(IServerConnection connection, DnsReceivedRawPackage queryPackage, RefCountDispose refCount, CancellationToken token)
+		private async Task ProcessRawPackageAsync(IServerConnection connection, DnsReceivedRawPackage queryPackage, RefCountDispose refCount, CancellationToken abortToken)
 		{
 			try
 			{
@@ -308,7 +449,7 @@ namespace DnsToolkit.Net.Dns
 
 				if (responsePackage.Length <= connection.Transport.DefaultAllowedResponseSize)
 				{
-					await connection.SendAsync(responsePackage, token);
+					await connection.SendAsync(responsePackage, abortToken);
 				}
 				else
 				{
@@ -319,7 +460,7 @@ namespace DnsToolkit.Net.Dns
 						foreach (var partialResponse in response.SplitResponse())
 						{
 							responsePackage = partialResponse.Encode(tsigMac, isSubSequentResponse, out newTsigMac);
-							await connection.SendAsync(responsePackage, token);
+							await connection.SendAsync(responsePackage, abortToken);
 							isSubSequentResponse = true;
 							tsigMac = newTsigMac;
 						}
@@ -412,7 +553,7 @@ namespace DnsToolkit.Net.Dns
 						}
 						#endregion
 
-						await connection.SendAsync(responsePackage, token);
+						await connection.SendAsync(responsePackage, abortToken);
 					}
 					else
 					{
@@ -421,7 +562,7 @@ namespace DnsToolkit.Net.Dns
 						response = query.CreateFailureResponse();
 
 						responsePackage = response.Encode(tsigMac, false, out newTsigMac);
-						await connection.SendAsync(responsePackage, token);
+						await connection.SendAsync(responsePackage, abortToken);
 					}
 				}
 
@@ -526,9 +667,44 @@ namespace DnsToolkit.Net.Dns
 		/// </summary>
 		public event AsyncEventHandler<QueryReceivedEventArgs>? QueryReceived;
 
+		/// <summary>
+		///   Stops the server like <see cref="Stop" /> and disposes the transports
+		/// </summary>
 		void IDisposable.Dispose()
 		{
 			Stop();
+
+			foreach (var transport in _transports)
+			{
+				transport.TryDispose();
+			}
+		}
+
+		/// <summary>
+		///   Stops the server like <see cref="StopAsync" /> and disposes the transports
+		/// </summary>
+		async ValueTask IAsyncDisposable.DisposeAsync()
+		{
+			await StopAsync().ConfigureAwait(false);
+
+			foreach (var transport in _transports)
+			{
+				try
+				{
+					if (transport is IAsyncDisposable asyncDisposable)
+					{
+						await asyncDisposable.DisposeAsync().ConfigureAwait(false);
+					}
+					else
+					{
+						transport.Dispose();
+					}
+				}
+				catch
+				{
+					// like TryDispose, disposing must not fail
+				}
+			}
 		}
 	}
 }

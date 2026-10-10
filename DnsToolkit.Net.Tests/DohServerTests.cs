@@ -302,6 +302,63 @@ public class DohServerTests
 		Assert.Null(options.ConfigureKestrel);
 	}
 
+	[Fact]
+	public async Task StopAsync_AnswersQueryInProgress_AndRejectsQueuedQueryImmediately()
+	{
+		var port = LocalDnsServer.GetFreePort();
+		var received = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+		var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+		// a long shutdown timeout, so waiting for it cannot be mistaken for the rejection
+		var shutdownTimeout = TimeSpan.FromSeconds(10);
+		var server = new DnsServer(new HttpsServerTransport(LocalDnsServer.SharedCertificate, new HttpsServerTransportOptions { Address = IPAddress.Loopback, Port = port, ShutdownTimeout = shutdownTimeout }));
+		server.QueryReceived += async (sender, e) =>
+		{
+			if (((DnsMessage) e.Query).TransactionID == 0x1111)
+			{
+				received.TrySetResult(true);
+				await release.Task;
+			}
+
+			await AnswerQuery(sender, e);
+		};
+		server.Start();
+
+		using var http = CreateHttpClient();
+		try
+		{
+			// The server listens on IPv4 only. With localhost the client tries IPv6 first, which takes about 2 seconds
+			// on Windows, so the queued query could arrive only after the server closed.
+			var inProgress = PostQueryAsync(http, port, 0x1111, host: "127.0.0.1");
+			Assert.True(await Task.WhenAny(received.Task, Task.Delay(TimeSpan.FromSeconds(5))) == received.Task, "The query was not received");
+
+			var stopping = server.StopAsync();
+
+			// the server does not accept queries anymore, so this one waits in the queue of the transport
+			var queued = PostQueryAsync(http, port, 0x2222, host: "127.0.0.1");
+			await Task.Delay(500);
+			release.TrySetResult(true);
+
+			var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+			var answered = await inProgress;
+			Assert.Equal(HttpStatusCode.OK, answered.StatusCode);
+			AssertAnswer(await answered.Content.ReadAsByteArrayAsync(), 0x1111);
+
+			var rejected = await queued;
+			Assert.Equal(HttpStatusCode.ServiceUnavailable, rejected.StatusCode);
+
+			Assert.True(await Task.WhenAny(stopping, Task.Delay(shutdownTimeout)) == stopping, "The server did not stop");
+			await stopping;
+			Assert.InRange(stopwatch.Elapsed, TimeSpan.Zero, TimeSpan.FromSeconds(3));
+		}
+		finally
+		{
+			release.TrySetResult(true);
+			await ((IAsyncDisposable) server).DisposeAsync();
+		}
+	}
+
 	private static StartedServer StartServer(int port)
 	{
 		return StartServer(new HttpsServerTransportOptions { Address = IPAddress.Loopback, Port = port });
@@ -355,11 +412,11 @@ public class DohServerTests
 		return new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(10) };
 	}
 
-	private static Task<HttpResponseMessage> PostQueryAsync(HttpClient http, int port, ushort transactionId, string path = "dns-query")
+	private static Task<HttpResponseMessage> PostQueryAsync(HttpClient http, int port, ushort transactionId, string path = "dns-query", string host = "localhost")
 	{
 		var content = new ByteArrayContent(Query(transactionId));
 		content.Headers.ContentType = new MediaTypeHeaderValue("application/dns-message");
-		return http.PostAsync($"https://localhost:{port}/{path}", content);
+		return http.PostAsync($"https://{host}:{port}/{path}", content);
 	}
 
 	private static byte[] Query(ushort transactionId)

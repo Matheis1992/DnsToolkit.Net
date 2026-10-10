@@ -198,7 +198,12 @@ public class DnsServerConnectionLimitTests
 
 		public Task<bool> InitializeAsync(CancellationToken token = default) => Task.FromResult(true);
 
-		public Task<DnsReceivedRawPackage?> ReceiveAsync(CancellationToken token = default) => _closed.Task;
+		public Task<DnsReceivedRawPackage?> ReceiveAsync(CancellationToken token = default)
+		{
+			// like a TCP connection, which ends without a further query when the server stops
+			token.Register(Close);
+			return _closed.Task;
+		}
 
 		public Task<bool> SendAsync(DnsRawPackage package, CancellationToken token = default) => Task.FromResult(true);
 
