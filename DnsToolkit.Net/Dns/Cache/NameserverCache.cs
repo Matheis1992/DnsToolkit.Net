@@ -18,6 +18,7 @@
 
 using System.Net;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Internal;
 
 namespace DnsToolkit.Net.Dns
 {
@@ -43,6 +44,7 @@ namespace DnsToolkit.Net.Dns
 		}
 
 		private readonly MemoryCache _cache;
+		private readonly ISystemClock _clock;
 
 		// serializes the read-modify-write of zone entries, adding nameservers is rare compared to lookups
 		private readonly object _addLock = new();
@@ -50,12 +52,19 @@ namespace DnsToolkit.Net.Dns
 		public NameserverCache()
 			: this(DEFAULT_SIZE_LIMIT, _defaultExpirationScanFrequency) { }
 
-		internal NameserverCache(long sizeLimit, TimeSpan expirationScanFrequency)
+		/// <param name="sizeLimit">The maximum number of cached zones</param>
+		/// <param name="expirationScanFrequency">The minimum time between two scans for expired zones</param>
+		/// <param name="clock">The clock for the time to live of the addresses, the system clock if null</param>
+		internal NameserverCache(long sizeLimit, TimeSpan expirationScanFrequency, ISystemClock? clock = null)
 		{
+			_clock = clock ?? new SystemClock();
+
+			// the cache uses the same clock, so the removal of expired zones agrees with the time to live
 			_cache = new MemoryCache(new MemoryCacheOptions
 			{
 				SizeLimit = sizeLimit,
 				ExpirationScanFrequency = expirationScanFrequency,
+				Clock = _clock,
 			});
 		}
 
@@ -66,7 +75,7 @@ namespace DnsToolkit.Net.Dns
 
 		public void Add(DomainName zoneName, IPAddress address, int timeToLive)
 		{
-			var utcNow = DateTime.UtcNow;
+			var utcNow = _clock.UtcNow.UtcDateTime;
 			var expireDateUtc = utcNow.AddSeconds(timeToLive);
 
 			lock (_addLock)
@@ -102,7 +111,7 @@ namespace DnsToolkit.Net.Dns
 		{
 			if (_cache.TryGetValue(zoneName, out ZoneAddresses? zone))
 			{
-				var utcNow = DateTime.UtcNow;
+				var utcNow = _clock.UtcNow.UtcDateTime;
 
 				lock (zone!)
 				{

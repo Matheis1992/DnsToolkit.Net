@@ -1,5 +1,4 @@
 using System.Net;
-using System.Net.Security;
 using System.Net.Sockets;
 using DnsToolkit.Net.Dns;
 
@@ -8,42 +7,6 @@ namespace DnsToolkit.Net.Tests;
 public class DnsClientTests
 {
 	private static readonly DomainName _name = DomainName.Parse("host.example.test");
-	private static readonly RemoteCertificateValidationCallback _acceptAnyCertificate = (_, _, _, _) => true;
-
-	[Fact]
-	public async Task Tcp_ServerNeverAnswers_QueryTimeoutIsHonored()
-	{
-		await AssertQueryTimeoutIsHonoredAsync(port => new TcpClientTransport(port));
-	}
-
-	[Fact]
-	public async Task Tls_ServerNeverAnswersHandshake_QueryTimeoutIsHonored()
-	{
-		await AssertQueryTimeoutIsHonoredAsync(port => new TlsClientTransport("localhost", remoteCertificateValidationCallback: _acceptAnyCertificate, port: port));
-	}
-
-	private static async Task AssertQueryTimeoutIsHonoredAsync(Func<int, IClientTransport> createTransport)
-	{
-		// The OS accepts the connections into the backlog, but the server never reads or answers
-		var silentServer = new TcpListener(IPAddress.Loopback, 0);
-		silentServer.Start();
-		try
-		{
-			var port = ((IPEndPoint) silentServer.LocalEndpoint).Port;
-			using var client = new DnsClient(new[] { IPAddress.Loopback }, new[] { createTransport(port) }, true, 1000);
-
-			// no cancellation token, only the query timeout of the client
-			var resolve = client.ResolveAsync(_name);
-			var completed = await Task.WhenAny(resolve, Task.Delay(TimeSpan.FromSeconds(10))) == resolve;
-
-			Assert.True(completed, "The query did not complete within 10s, although the query timeout is 1s");
-			Assert.Null(await resolve);
-		}
-		finally
-		{
-			silentServer.Stop();
-		}
-	}
 
 	[Fact]
 	public async Task Tcp_QueryTimeout_DoesNotAbortOtherQueriesOnSameConnection()

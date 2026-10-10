@@ -17,6 +17,7 @@
 #endregion
 
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Internal;
 
 namespace DnsToolkit.Net.Dns
 {
@@ -89,16 +90,24 @@ namespace DnsToolkit.Net.Dns
 		}
 
 		private readonly MemoryCache _cache;
+		private readonly ISystemClock _clock;
 
 		public DnsCache()
 			: this(DEFAULT_SIZE_LIMIT, _defaultExpirationScanFrequency) { }
 
-		internal DnsCache(long sizeLimit, TimeSpan expirationScanFrequency)
+		/// <param name="sizeLimit">The maximum number of cached records</param>
+		/// <param name="expirationScanFrequency">The minimum time between two scans for expired entries</param>
+		/// <param name="clock">The clock for the time to live of the entries, the system clock if null</param>
+		internal DnsCache(long sizeLimit, TimeSpan expirationScanFrequency, ISystemClock? clock = null)
 		{
+			_clock = clock ?? new SystemClock();
+
+			// the cache uses the same clock, so the removal of expired entries agrees with the time to live
 			_cache = new MemoryCache(new MemoryCacheOptions
 			{
 				SizeLimit = sizeLimit,
 				ExpirationScanFrequency = expirationScanFrequency,
+				Clock = _clock,
 			});
 		}
 
@@ -128,7 +137,7 @@ namespace DnsToolkit.Net.Dns
 				return;
 			}
 
-			var expireDateUtc = DateTime.UtcNow.AddSeconds(timeToLive);
+			var expireDateUtc = _clock.UtcNow.UtcDateTime.AddSeconds(timeToLive);
 
 			// replaces an existing entry
 			_cache.Set(key, new CacheValue(records, expireDateUtc), new MemoryCacheEntryOptions
@@ -155,7 +164,7 @@ namespace DnsToolkit.Net.Dns
 			where TRecord : DnsRecordBase
 		{
 			CacheKey key = new CacheKey(name, recordType, recordClass);
-			DateTime utcNow = DateTime.UtcNow;
+			DateTime utcNow = _clock.UtcNow.UtcDateTime;
 
 			if (_cache.TryGetValue(key, out CacheValue? cacheValue) && (cacheValue!.ExpireDateUtc > utcNow))
 			{
