@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
+using System.Threading.Channels;
 using DnsToolkit.Net.Dns;
 
 namespace DnsToolkit.Net.Tests;
@@ -59,6 +60,34 @@ public class PipelinedConnectionTests
 		Assert.Null(await slow);
 	}
 
+	[Fact]
+	public async Task QueryTimeout_DoesNotAbortOtherQueriesOnTheSameConnection()
+	{
+		var transport = new ControlledTransport();
+		using var client = new DnsClient(new[] { IPAddress.Loopback }, new IClientTransport[] { transport }, true, 1000);
+
+		// the slow query opens the pooled connection and is never answered
+		var slow = client.ResolveAsync(DomainName.Parse("slow.example.test"));
+		Assert.True(await transport.Connection.WaitForQueryAsync("slow", TimeSpan.FromSeconds(5)), "The slow query was not sent");
+
+		// the fast query uses the same connection, it is answered only after the slow query timed out
+		await Task.Delay(500);
+		var fast = client.ResolveAsync(DomainName.Parse("fast.example.test"));
+		Assert.True(await transport.Connection.WaitForQueryAsync("fast", TimeSpan.FromSeconds(5)), "The fast query was not sent");
+
+		Assert.True(await Task.WhenAny(slow, Task.Delay(TimeSpan.FromSeconds(5))) == slow, "The slow query did not time out");
+		Assert.Null(await slow);
+
+		transport.Connection.Answer("fast");
+
+		Assert.True(await Task.WhenAny(fast, Task.Delay(TimeSpan.FromSeconds(5))) == fast, "The fast query was not answered");
+		var fastResponse = await fast;
+		Assert.NotNull(fastResponse);
+		Assert.Single(fastResponse!.AnswerRecords);
+		Assert.Equal(1, transport.ConnectCount);
+		Assert.False(transport.Connection.IsFaulty);
+	}
+
 	private static DnsMessage Answer(DnsMessage query)
 	{
 		var response = query.CreateResponseInstance();
@@ -108,6 +137,95 @@ public class PipelinedConnectionTests
 			Interlocked.Increment(ref _connectCount);
 			return Task.FromResult<IPipelineableClientConnection?>(Connection);
 		}
+	}
+
+	/// <summary>
+	///   A pipelined transport with one connection, whose responses are sent by the test
+	/// </summary>
+	private sealed class ControlledTransport : PipelinedClientTransportBase
+	{
+		private int _connectCount;
+
+		public ControlledTransport()
+			: base(53)
+		{
+			Connection = new ControlledConnection(this);
+		}
+
+		public ControlledConnection Connection { get; }
+
+		public int ConnectCount => Volatile.Read(ref _connectCount);
+
+		public override ushort MaximumAllowedQuerySize => UInt16.MaxValue;
+
+		protected override Task<IPipelineableClientConnection?> ConnectInternalAsync(DnsClientEndpointInfo endpointInfo, int queryTimeout, CancellationToken token)
+		{
+			Interlocked.Increment(ref _connectCount);
+			return Task.FromResult<IPipelineableClientConnection?>(Connection);
+		}
+	}
+
+	/// <summary>
+	///   Records the sent queries by the first label of their name and answers them, when the test says so
+	/// </summary>
+	private sealed class ControlledConnection : IPipelineableClientConnection
+	{
+		private readonly Channel<DnsReceivedRawPackage> _responses = Channel.CreateUnbounded<DnsReceivedRawPackage>();
+		private readonly ConcurrentDictionary<string, TaskCompletionSource<DnsMessage>> _queries = new();
+
+		public ControlledConnection(IClientTransport transport)
+		{
+			Transport = transport;
+		}
+
+		public IClientTransport Transport { get; }
+
+		public bool IsAlive => !IsFaulty;
+
+		public bool IsFaulty { get; private set; }
+
+		private TaskCompletionSource<DnsMessage> GetQuery(string label)
+			=> _queries.GetOrAdd(label, _ => new TaskCompletionSource<DnsMessage>(TaskCreationOptions.RunContinuationsAsynchronously));
+
+		public async Task<bool> WaitForQueryAsync(string label, TimeSpan timeout)
+		{
+			var query = GetQuery(label).Task;
+			return await Task.WhenAny(query, Task.Delay(timeout)) == query;
+		}
+
+		public void Answer(string label)
+		{
+			var response = PipelinedConnectionTests.Answer(GetQuery(label).Task.Result);
+			_responses.Writer.TryWrite(new DnsReceivedRawPackage(response.Encode().ToArraySegment(true).ToArray(), new IPEndPoint(IPAddress.Loopback, 53), new IPEndPoint(IPAddress.Loopback, 50000)));
+		}
+
+		public Task<bool> SendAsync(DnsRawPackage package, CancellationToken token = default)
+		{
+			var query = DnsMessage.Parse(package.ToArraySegment(false));
+			GetQuery(query.Questions[0].Name.Labels[0]).TrySetResult(query);
+			return Task.FromResult(true);
+		}
+
+		public async Task<DnsReceivedRawPackage?> ReceiveAsync(CancellationToken token = default)
+		{
+			try
+			{
+				return await _responses.Reader.ReadAsync(token);
+			}
+			catch (ChannelClosedException)
+			{
+				return null;
+			}
+		}
+
+		public Task<DnsReceivedRawPackage?> ReceiveAsync(DnsMessageIdentification identification, CancellationToken token = default)
+			=> throw new NotSupportedException("The pooled connection uses the receive loop");
+
+		public void RestartIdleTimeout(TimeSpan? timeout) { }
+
+		public void MarkFaulty() => IsFaulty = true;
+
+		public void Dispose() => MarkFaulty();
 	}
 
 	/// <summary>
