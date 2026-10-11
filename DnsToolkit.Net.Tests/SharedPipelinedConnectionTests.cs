@@ -133,6 +133,46 @@ public class SharedPipelinedConnectionTests
 	}
 
 	[Fact]
+	public async Task Connection_IsClosed_AfterQueriesInARowGotNoResponseAtAll()
+	{
+		// e.g. the server keeps the connection open, but stopped answering. Before, it stayed in the pool and every query
+		// to the server waited for its timeout twice.
+		var (connection, shared) = Create();
+
+		for (var i = 0; i < SharedPipelinedConnection.MaxUnansweredQueries; i++)
+		{
+			Assert.True(shared.IsAlive, "The connection was closed before the limit of unanswered queries");
+
+			using var query = Lease(shared);
+			await query.SendAsync(Query((ushort) i, "unanswered"));
+		}
+
+		Assert.False(shared.IsAlive, "The connection, whose server stopped answering, is still used");
+		Assert.True(await WaitUntilClosedAsync(connection, TimeSpan.FromSeconds(5)), "The connection was not closed");
+	}
+
+	[Fact]
+	public async Task Connection_IsKept_WhileTheServerAnswersOtherQueries()
+	{
+		// queries, which end without a response, e.g. canceled by their caller, do not close a connection, whose server answers
+		var (connection, shared) = Create();
+
+		for (var i = 0; i < SharedPipelinedConnection.MaxUnansweredQueries * 2; i++)
+		{
+			using (var unanswered = Lease(shared))
+				await unanswered.SendAsync(Query((ushort) (2 * i), "unanswered"));
+
+			using var answered = Lease(shared);
+			var sent = Query((ushort) (2 * i + 1), "answered");
+			await answered.SendAsync(sent);
+			connection.Respond(sent, "a");
+			await ReceiveWithinAsync(answered, sent.MessageIdentification);
+		}
+
+		Assert.True(shared.IsAlive);
+	}
+
+	[Fact]
 	public async Task ManyUnreadMessages_AreDeliveredCompletelyAndInOrder()
 	{
 		var (connection, shared) = Create();

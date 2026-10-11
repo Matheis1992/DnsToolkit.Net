@@ -39,9 +39,16 @@ internal sealed class SharedPipelinedConnection : IPooledConnection
 	// canceled when the connection is closed, so the pending read of the receive loop ends
 	private readonly CancellationTokenSource _closeCts = new();
 
+	/// <summary>
+	///   The number of queries in a row, which ended without any response on the connection, after which it is closed. A server
+	///   may keep the connection open, but stop answering, e.g. when it is overloaded or a middlebox dropped its state.
+	/// </summary>
+	internal const int MaxUnansweredQueries = 3;
+
 	private readonly object _lock = new();
 	private readonly ReceiverQueues<PendingQuery> _queries = new();
 	private bool _isClosed;
+	private int _unansweredQueries;
 
 	// the server asked to close the connection, it is closed once all outstanding responses were received
 	private bool _isDraining;
@@ -175,13 +182,27 @@ internal sealed class SharedPipelinedConnection : IPooledConnection
 	/// </summary>
 	public void Unregister(PendingQuery query)
 	{
+		var isUnresponsive = false;
+
 		lock (_lock)
 		{
-			if (_queries.Remove(query.Identification, query) && (_queries.Count == 0))
-				_idleCts.CancelAfter(_idleTimeout);
+			if (_queries.Remove(query.Identification, query))
+			{
+				// A query, which was sent, but ended without any response, e.g. by its timeout. Every response on the connection
+				// resets the count, so only a server, which stopped answering on this connection, reaches the limit.
+				if (query.IsSent && !query.HasMessages && (++_unansweredQueries >= MaxUnansweredQueries))
+					isUnresponsive = true;
+
+				if (_queries.Count == 0)
+					_idleCts.CancelAfter(_idleTimeout);
+			}
 		}
 
 		query.Complete();
+
+		// the next queries establish a new connection
+		if (isUnresponsive)
+			MarkFaulty();
 	}
 
 	private async Task ReceiveLoopAsync()
@@ -199,6 +220,8 @@ internal sealed class SharedPipelinedConnection : IPooledConnection
 				PendingQuery? query;
 				lock (_lock)
 				{
+					// the server still answers, also if the query of the response is finished already
+					_unansweredQueries = 0;
 					query = SelectQuery(package.MessageIdentification);
 				}
 
@@ -357,6 +380,7 @@ internal sealed class PipelinedClientConnection : IClientConnection
 		try
 		{
 			isSent = await _connection.SendAsync(package, token).ConfigureAwait(false);
+			query.IsSent = isSent;
 			return isSent;
 		}
 		finally
@@ -458,9 +482,14 @@ internal sealed class PendingQuery
 	public DnsMessageIdentification Identification { get; }
 
 	/// <summary>
-	///   True, once a message was passed to the query. Only used by the receive loop inside its lock.
+	///   True, once a message was passed to the query. Only used inside of the lock of the connection.
 	/// </summary>
 	public bool HasMessages { get; set; }
+
+	/// <summary>
+	///   True, if the query was sent, so a response is expected. Set before the query is unregistered.
+	/// </summary>
+	public bool IsSent { get; set; }
 
 	/// <summary>
 	///   Adds a received message to the queue

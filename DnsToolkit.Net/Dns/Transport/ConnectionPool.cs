@@ -63,28 +63,37 @@ internal sealed class ConnectionPool<TConnection>
 	///   The token to monitor cancellation requests. It only ends the waiting of this caller, the connect is shared
 	///   and is not canceled.
 	/// </param>
-	/// <returns>The connection, or null if it could not be established</returns>
+	/// <returns>The connection, or null if no usable connection could be established</returns>
 	public async Task<TConnection?> GetOrConnectAsync(IPAddress address, Func<Task<TConnection?>> connect, CancellationToken token)
 	{
-		var entry = _pool.GetOrAdd(address, _ => new Lazy<Task<TConnection?>>(() => Task.Run(connect)));
-		var connectTask = entry.Value;
-
-		TConnection? connection;
-		try
+		while (true)
 		{
-			connection = await connectTask.WaitAsync(token).ConfigureAwait(false);
-		}
-		catch when (connectTask.IsFaulted || connectTask.IsCanceled)
-		{
-			// otherwise every further query would get the failed connect
-			Remove(address, entry);
-			throw;
-		}
+			var newEntry = new Lazy<Task<TConnection?>>(() => Task.Run(connect));
+			var entry = _pool.GetOrAdd(address, newEntry);
+			var connectTask = entry.Value;
 
-		if ((connection == null) || !connection.IsAlive)
+			TConnection? connection;
+			try
+			{
+				connection = await connectTask.WaitAsync(token).ConfigureAwait(false);
+			}
+			catch when (connectTask.IsFaulted || connectTask.IsCanceled)
+			{
+				// otherwise every further query would get the failed connect
+				Remove(address, entry);
+				throw;
+			}
+
+			if ((connection != null) && connection.IsAlive)
+				return connection;
+
 			Remove(address, entry);
 
-		return connection;
+			// A connection of the pool, which was closed or is draining meanwhile, e.g. by its idle timeout, is replaced by a
+			// new one. The own connect is not repeated, so a server, which closes every connection, is not connected endlessly.
+			if (ReferenceEquals(entry, newEntry))
+				return null;
+		}
 	}
 
 	/// <summary>

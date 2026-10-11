@@ -49,6 +49,39 @@ public class ConnectionPoolTests
 	}
 
 	[Fact]
+	public async Task GetOrConnect_ReplacesAPooledConnection_WhichWasClosedMeanwhile()
+	{
+		// e.g. closed by its idle timeout or draining after a keepalive of 0
+		var pool = new ConnectionPool<FakeConnection>();
+		var closed = new FakeConnection();
+		Assert.Same(closed, await pool.GetOrConnectAsync(_server, () => Task.FromResult<FakeConnection?>(closed), default));
+		closed.IsAlive = false;
+
+		// before, the closed connection was returned, so the query failed instead of connecting again
+		var fresh = new FakeConnection();
+		Assert.Same(fresh, await pool.GetOrConnectAsync(_server, () => Task.FromResult<FakeConnection?>(fresh), default));
+		Assert.Same(fresh, await pool.GetPooledAsync(_server, default));
+	}
+
+	[Fact]
+	public async Task GetOrConnect_ReturnsNull_WhenTheOwnNewConnectionIsClosedAlready()
+	{
+		// e.g. a server, which closes every connection at once, is not connected again and again
+		var pool = new ConnectionPool<FakeConnection>();
+		var connectCalls = 0;
+
+		var connection = await pool.GetOrConnectAsync(_server, () =>
+		{
+			Interlocked.Increment(ref connectCalls);
+			return Task.FromResult<FakeConnection?>(new FakeConnection { IsAlive = false });
+		}, default);
+
+		Assert.Null(connection);
+		Assert.Equal(1, connectCalls);
+		Assert.Equal(0, pool.Count);
+	}
+
+	[Fact]
 	public async Task Remove_DoesNotWaitForAPendingConnect()
 	{
 		var pool = new ConnectionPool<FakeConnection>();
