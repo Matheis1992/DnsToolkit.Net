@@ -217,6 +217,10 @@ public class SharedPipelinedConnectionTests
 		// e.g. the token of an application, which lives longer than the queries
 		var finishedQuery = RunQueryWithToken(connection, shared, callerCts.Token);
 
+		// Until the receive loop waits for the next message, it still holds the query, to which it passed the response. On a
+		// busy build server the garbage collection could happen before, so the query seemed to be kept by a registration.
+		Assert.True(SpinWait.SpinUntil(() => connection.ReceiveCalls >= 2, TimeSpan.FromSeconds(5)), "The receive loop did not wait for the next message");
+
 		GC.Collect();
 		GC.WaitForPendingFinalizers();
 		GC.Collect();
