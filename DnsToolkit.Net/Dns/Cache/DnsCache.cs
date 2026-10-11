@@ -28,8 +28,25 @@ namespace DnsToolkit.Net.Dns
 	}
 
 	/// <summary>
+	///   How trustworthy cached records are, like the ranking of RFC 2181, section 5.4.1
+	/// </summary>
+	internal enum DnsCacheTrust
+	{
+		/// <summary>
+		///   Records, which were in the answer to a query for another name, e.g. the records of the target of a CNAME record
+		/// </summary>
+		Additional = 0,
+
+		/// <summary>
+		///   The answer to a query for the name of the records
+		/// </summary>
+		Answer = 1,
+	}
+
+	/// <summary>
 	///   Caches resolved records until their time to live expires. The cache is limited in size, expired entries
 	///   are removed regularly and the entries used least recently are removed first if the limit is reached.
+	///   An entry is only replaced by records, which are at least as trustworthy, until it expires (RFC 2181, section 5.4.1).
 	/// </summary>
 	internal class DnsCache
 	{
@@ -82,16 +99,33 @@ namespace DnsToolkit.Net.Dns
 		{
 			public DateTime ExpireDateUtc { get; }
 			public DnsCacheRecordList<DnsRecordBase> Records { get; }
+			public DnsCacheTrust Trust { get; }
 
-			public CacheValue(DnsCacheRecordList<DnsRecordBase> records, DateTime expireDateUtc)
+			public CacheValue(DnsCacheRecordList<DnsRecordBase> records, DnsCacheTrust trust, DateTime expireDateUtc)
 			{
 				Records = records;
+				Trust = trust;
 				ExpireDateUtc = expireDateUtc;
+			}
+
+			/// <summary>
+			///   True, if the records replace this entry: they are of a higher trust, or of the same trust and not unsigned
+			///   records, which would replace signed ones
+			/// </summary>
+			public bool IsReplacedBy(DnsCacheTrust trust, DnsSecValidationResult validationResult)
+			{
+				if (trust != Trust)
+					return trust > Trust;
+
+				return (Records.ValidationResult != DnsSecValidationResult.Signed) || (validationResult == DnsSecValidationResult.Signed);
 			}
 		}
 
 		private readonly MemoryCache _cache;
 		private readonly ISystemClock _clock;
+
+		// serializes the check of the existing entry and its replacement
+		private readonly object _addLock = new();
 
 		public DnsCache()
 			: this(DEFAULT_SIZE_LIMIT, _defaultExpirationScanFrequency) { }
@@ -117,35 +151,42 @@ namespace DnsToolkit.Net.Dns
 		/// </summary>
 		internal int Count => _cache.Count;
 
-		public void Add<TRecord>(DomainName name, RecordType recordType, RecordClass recordClass, IEnumerable<TRecord> records, DnsSecValidationResult validationResult, int timeToLive)
+		public void Add<TRecord>(DomainName name, RecordType recordType, RecordClass recordClass, IEnumerable<TRecord> records, DnsSecValidationResult validationResult, int timeToLive, DnsCacheTrust trust = DnsCacheTrust.Answer)
 			where TRecord : DnsRecordBase
 		{
 			DnsCacheRecordList<DnsRecordBase> cacheValues = new DnsCacheRecordList<DnsRecordBase>();
 			cacheValues.AddRange(records);
 			cacheValues.ValidationResult = validationResult;
 
-			Add(name, recordType, recordClass, cacheValues, timeToLive);
+			Add(name, recordType, recordClass, cacheValues, timeToLive, trust);
 		}
 
-		public void Add(DomainName name, RecordType recordType, RecordClass recordClass, DnsCacheRecordList<DnsRecordBase> records, int timeToLive)
+		public void Add(DomainName name, RecordType recordType, RecordClass recordClass, DnsCacheRecordList<DnsRecordBase> records, int timeToLive, DnsCacheTrust trust = DnsCacheTrust.Answer)
 		{
 			CacheKey key = new CacheKey(name, recordType, recordClass);
+			var utcNow = _clock.UtcNow.UtcDateTime;
 
-			if (timeToLive <= 0)
+			lock (_addLock)
 			{
-				// nothing to cache, but an older entry must not be returned anymore
-				_cache.Remove(key);
-				return;
+				// a valid entry is kept, until it expires, if the new records are less trustworthy
+				if (_cache.TryGetValue(key, out CacheValue? existing) && (existing!.ExpireDateUtc > utcNow) && !existing.IsReplacedBy(trust, records.ValidationResult))
+					return;
+
+				if (timeToLive <= 0)
+				{
+					// nothing to cache, but an older entry must not be returned anymore
+					_cache.Remove(key);
+					return;
+				}
+
+				var expireDateUtc = utcNow.AddSeconds(timeToLive);
+
+				_cache.Set(key, new CacheValue(records, trust, expireDateUtc), new MemoryCacheEntryOptions
+				{
+					AbsoluteExpiration = new DateTimeOffset(expireDateUtc, TimeSpan.Zero),
+					Size = records.Count + 1,
+				});
 			}
-
-			var expireDateUtc = _clock.UtcNow.UtcDateTime.AddSeconds(timeToLive);
-
-			// replaces an existing entry
-			_cache.Set(key, new CacheValue(records, expireDateUtc), new MemoryCacheEntryOptions
-			{
-				AbsoluteExpiration = new DateTimeOffset(expireDateUtc, TimeSpan.Zero),
-				Size = records.Count + 1,
-			});
 		}
 
 		public bool TryGetRecords<TRecord>(DomainName name, RecordType recordType, RecordClass recordClass, out List<TRecord>? records)

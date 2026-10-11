@@ -277,7 +277,7 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 						throw new DnsSecValidationException("CNAME matching records could not be validated");
 
 					var validationResult = cNameValidationResult == matchingValidationResult ? cNameValidationResult : DnsSecValidationResult.Unsigned;
-					_cache.Add(canonicalName, recordType, recordClass, matchingAdditionalRecords, validationResult, matchingAdditionalRecords.Min(x => x.TimeToLive));
+					_cache.Add(canonicalName, recordType, recordClass, matchingAdditionalRecords, validationResult, matchingAdditionalRecords.Min(x => x.TimeToLive), DnsCacheTrust.Additional);
 
 					return new DnsSecResult<T>(matchingAdditionalRecords.OfType<T>().ToList(), validationResult);
 				}

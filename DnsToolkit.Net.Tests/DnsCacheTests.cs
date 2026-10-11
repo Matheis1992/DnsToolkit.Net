@@ -120,6 +120,71 @@ public class DnsCacheTests
 	}
 
 	[Fact]
+	public void AdditionalRecords_DoNotReplaceAnAnswer()
+	{
+		// e.g. the records of a CNAME target, which were in the answer of the server of the alias
+		var cache = new DnsCache();
+
+		cache.Add(_name, RecordType.A, RecordClass.INet, Records(_name, "192.0.2.1"), 3600);
+		cache.Add(_name, RecordType.A, RecordClass.INet, Records(_name, "192.0.2.2"), 3600, DnsCacheTrust.Additional);
+
+		Assert.True(cache.TryGetRecords<ARecord>(_name, RecordType.A, RecordClass.INet, out List<ARecord>? records));
+		Assert.Equal(IPAddress.Parse("192.0.2.1"), Assert.Single(records!).Address);
+	}
+
+	[Fact]
+	public void Answer_ReplacesAdditionalRecords()
+	{
+		var cache = new DnsCache();
+
+		cache.Add(_name, RecordType.A, RecordClass.INet, Records(_name, "192.0.2.1"), 3600, DnsCacheTrust.Additional);
+		cache.Add(_name, RecordType.A, RecordClass.INet, Records(_name, "192.0.2.2"), 3600);
+
+		Assert.True(cache.TryGetRecords<ARecord>(_name, RecordType.A, RecordClass.INet, out List<ARecord>? records));
+		Assert.Equal(IPAddress.Parse("192.0.2.2"), Assert.Single(records!).Address);
+	}
+
+	[Fact]
+	public void SignedRecords_AreNotReplacedByUnsignedRecords()
+	{
+		var cache = new DnsCache();
+		var signed = Records(_name, "192.0.2.1");
+		signed.ValidationResult = DnsSecValidationResult.Signed;
+
+		cache.Add(_name, RecordType.A, RecordClass.INet, signed, 3600);
+		cache.Add(_name, RecordType.A, RecordClass.INet, Records(_name, "192.0.2.2"), 3600);
+
+		Assert.True(cache.TryGetRecords<ARecord>(_name, RecordType.A, RecordClass.INet, out DnsCacheRecordList<ARecord>? records));
+		Assert.Equal(IPAddress.Parse("192.0.2.1"), Assert.Single(records!).Address);
+		Assert.Equal(DnsSecValidationResult.Signed, records!.ValidationResult);
+	}
+
+	[Fact]
+	public void ZeroTimeToLive_OfAdditionalRecords_DoesNotRemoveAnAnswer()
+	{
+		var cache = new DnsCache();
+
+		cache.Add(_name, RecordType.A, RecordClass.INet, Records(_name, "192.0.2.1"), 3600);
+		cache.Add(_name, RecordType.A, RecordClass.INet, Records(_name, "192.0.2.2"), 0, DnsCacheTrust.Additional);
+
+		Assert.True(cache.TryGetRecords<ARecord>(_name, RecordType.A, RecordClass.INet, out List<ARecord>? _));
+	}
+
+	[Fact]
+	public void ExpiredAnswer_IsReplacedByAdditionalRecords()
+	{
+		var clock = new ManualClock();
+		var cache = new DnsCache(DnsCache.DEFAULT_SIZE_LIMIT, _scanFrequency, clock);
+
+		cache.Add(_name, RecordType.A, RecordClass.INet, Records(_name, "192.0.2.1"), 60);
+		clock.Advance(TimeSpan.FromMinutes(2));
+		cache.Add(_name, RecordType.A, RecordClass.INet, Records(_name, "192.0.2.2"), 3600, DnsCacheTrust.Additional);
+
+		Assert.True(cache.TryGetRecords<ARecord>(_name, RecordType.A, RecordClass.INet, out List<ARecord>? records));
+		Assert.Equal(IPAddress.Parse("192.0.2.2"), Assert.Single(records!).Address);
+	}
+
+	[Fact]
 	public void ZeroTimeToLive_RemovesExistingEntry()
 	{
 		var cache = new DnsCache();

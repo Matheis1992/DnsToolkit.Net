@@ -233,7 +233,7 @@ namespace DnsToolkit.Net.Dns
 						: new List<DnsRecordBase>();
 					if (matchingAdditionalRecords.Count > 0)
 					{
-						_cache.Add(canonicalName, recordType, recordClass, matchingAdditionalRecords, DnsSecValidationResult.Indeterminate, matchingAdditionalRecords.Min(x => x.TimeToLive));
+						_cache.Add(canonicalName, recordType, recordClass, matchingAdditionalRecords, DnsSecValidationResult.Indeterminate, matchingAdditionalRecords.Min(x => x.TimeToLive), DnsCacheTrust.Additional);
 						return matchingAdditionalRecords.OfType<T>().ToList();
 					}
 
