@@ -44,6 +44,32 @@ public class TcpTransportTests
 	}
 
 	[Fact]
+	public async Task Server_ClosesConnection_WhoseClientDoesNotReadTheResponses()
+	{
+		// with a limit of one connection, the second client is only served after the first connection was closed
+		var big = DomainName.Parse("big.example.test");
+		var records = new List<DnsRecordBase> { new ARecord(_name, 60, _address) };
+		records.AddRange(Enumerable.Range(0, 200).Select(i => new TxtRecord(big, 60, i + new string('x', 200))));
+		using var server = new LocalDnsServer(records, tcpTimeout: 1000, maxConcurrentConnectionsPerTransport: 1);
+
+		// queries for large responses, which the client never reads, so the buffers of both sides fill up and the writes of the server block
+		using var first = new TcpClient();
+		await first.ConnectAsync(IPAddress.Loopback, server.Port);
+		var queries = Enumerable.Range(0, 500).SelectMany(i => Query((ushort) i, big, RecordType.Txt)).ToArray();
+		await first.GetStream().WriteAsync(queries, 0, queries.Length);
+
+		using var second = new TcpClient();
+		await second.ConnectAsync(IPAddress.Loopback, server.Port);
+		var query = Query(0x4242);
+		await second.GetStream().WriteAsync(query, 0, query.Length);
+
+		// before, the blocked writes kept the first connection and its slot forever
+		var response = ReadResponseAsync(second.GetStream());
+		Assert.True(await Task.WhenAny(response, Task.Delay(TimeSpan.FromSeconds(10))) == response, "The second client was not served, so the first connection was not closed");
+		Assert.Equal(0x4242, (await response).TransactionID);
+	}
+
+	[Fact]
 	public async Task TransportBoundToIPv6Any_AcceptsIPv4_AlsoAfterARestart()
 	{
 		if (!Socket.OSSupportsIPv6)
@@ -200,10 +226,12 @@ public class TcpTransportTests
 		return new LocalDnsServer(new DnsRecordBase[] { new ARecord(_name, 60, _address) }, tcpTimeout: tcpTimeout, tcpKeepAlive: tcpKeepAlive, maxConcurrentConnectionsPerTransport: maxConcurrentConnections);
 	}
 
-	private static byte[] Query(ushort transactionId)
+	private static byte[] Query(ushort transactionId) => Query(transactionId, _name, RecordType.A);
+
+	private static byte[] Query(ushort transactionId, DomainName name, RecordType recordType)
 	{
 		var query = new DnsMessage { TransactionID = transactionId };
-		query.Questions.Add(new DnsQuestion(_name, RecordType.A, RecordClass.INet));
+		query.Questions.Add(new DnsQuestion(name, recordType, RecordClass.INet));
 		return query.Encode().ToArraySegment(true).ToArray();
 	}
 

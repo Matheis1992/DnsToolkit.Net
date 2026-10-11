@@ -106,6 +106,24 @@ public class HttpsServerTransportOptions
 	private long? _maxConcurrentConnections = 1000;
 
 	/// <summary>
+	///   The maximum number of requests, which wait for the DNS server to process them. If it is reached, further requests are
+	///   rejected with 503 Service Unavailable, until the server took some of them. Default: 1000
+	/// </summary>
+	public int MaxQueuedRequests
+	{
+		get => _maxQueuedRequests;
+		set
+		{
+			if (value < 1)
+				throw new ArgumentOutOfRangeException(nameof(value), "At least one request has to be allowed");
+
+			_maxQueuedRequests = value;
+		}
+	}
+
+	private int _maxQueuedRequests = 1000;
+
+	/// <summary>
 	///   Configures further settings of the Kestrel web server, e.g. limits or HTTP/2 settings.
 	///   It is called after the other settings are applied, so it can also change them. Default: null
 	/// </summary>

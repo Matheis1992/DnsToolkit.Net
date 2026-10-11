@@ -365,6 +365,7 @@ public class DohServerTests
 		Assert.Throws<ArgumentException>(() => options.Path = " ");
 		Assert.Throws<ArgumentOutOfRangeException>(() => options.ShutdownTimeout = TimeSpan.FromSeconds(-1));
 		Assert.Throws<ArgumentOutOfRangeException>(() => options.MaxConcurrentConnections = 0);
+		Assert.Throws<ArgumentOutOfRangeException>(() => options.MaxQueuedRequests = 0);
 
 		options.MaxConcurrentConnections = null;
 		Assert.Null(options.MaxConcurrentConnections);
@@ -381,7 +382,105 @@ public class DohServerTests
 		Assert.Equal(System.Security.Authentication.SslProtocols.Tls12 | System.Security.Authentication.SslProtocols.Tls13, options.SslProtocols);
 		Assert.Equal(TimeSpan.FromSeconds(5), options.ShutdownTimeout);
 		Assert.Equal(1000, options.MaxConcurrentConnections);
+		Assert.Equal(1000, options.MaxQueuedRequests);
 		Assert.Null(options.ConfigureKestrel);
+	}
+
+	[Fact]
+	public async Task Options_MaxQueuedRequests_RejectsFurtherRequests_WhileTheQueueIsFull()
+	{
+		var port = LocalDnsServer.GetFreePort();
+		var received = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+		var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+		// the server processes one query at a time and one more waits in the queue of the transport
+		var server = new DnsServer(new HttpsServerTransport(LocalDnsServer.SharedCertificate, new HttpsServerTransportOptions { Address = IPAddress.Loopback, Port = port, MaxQueuedRequests = 1 }))
+		{
+			MaxConcurrentConnectionsPerTransport = 1
+		};
+		server.QueryReceived += async (sender, e) =>
+		{
+			received.TrySetResult(true);
+			await release.Task;
+			await AnswerQuery(sender, e);
+		};
+		server.Start();
+
+		using var http = CreateHttpClient();
+		try
+		{
+			var inProgress = PostQueryAsync(http, port, 0x1111);
+			Assert.True(await Task.WhenAny(received.Task, Task.Delay(TimeSpan.FromSeconds(5))) == received.Task, "The query was not received");
+
+			var queued = PostQueryAsync(http, port, 0x2222);
+			await Task.Delay(500);
+
+			// before, the queue grew without limit
+			var rejected = await PostQueryAsync(http, port, 0x3333);
+			Assert.Equal(HttpStatusCode.ServiceUnavailable, rejected.StatusCode);
+
+			release.TrySetResult(true);
+			Assert.Equal(HttpStatusCode.OK, (await inProgress).StatusCode);
+			Assert.Equal(HttpStatusCode.OK, (await queued).StatusCode);
+		}
+		finally
+		{
+			release.TrySetResult(true);
+			await ((IAsyncDisposable) server).DisposeAsync();
+		}
+	}
+
+	[Fact]
+	public async Task QueuedRequest_WhichTheClientAborted_IsNotProcessed()
+	{
+		var port = LocalDnsServer.GetFreePort();
+		var received = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+		var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+		var processed = new List<ushort>();
+
+		var server = new DnsServer(new HttpsServerTransport(LocalDnsServer.SharedCertificate, new HttpsServerTransportOptions { Address = IPAddress.Loopback, Port = port }))
+		{
+			MaxConcurrentConnectionsPerTransport = 1
+		};
+		server.QueryReceived += async (sender, e) =>
+		{
+			lock (processed)
+				processed.Add(((DnsMessage) e.Query).TransactionID);
+
+			received.TrySetResult(true);
+			await release.Task;
+			await AnswerQuery(sender, e);
+		};
+		server.Start();
+
+		using var http = CreateHttpClient();
+		try
+		{
+			var inProgress = PostQueryAsync(http, port, 0x1111);
+			Assert.True(await Task.WhenAny(received.Task, Task.Delay(TimeSpan.FromSeconds(5))) == received.Task, "The query was not received");
+
+			// waits in the queue of the transport, until the client gives up
+			using (var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500)))
+			{
+				var content = DnsContent(Query(0x2222));
+				await Assert.ThrowsAnyAsync<OperationCanceledException>(() => http.PostAsync($"https://{Host}:{port}/dns-query", content, cts.Token));
+			}
+
+			await Task.Delay(500);
+			release.TrySetResult(true);
+
+			Assert.Equal(HttpStatusCode.OK, (await inProgress).StatusCode);
+			Assert.Equal(HttpStatusCode.OK, (await PostQueryAsync(http, port, 0x3333)).StatusCode);
+
+			// before, the aborted request was still processed
+			lock (processed)
+				Assert.Equal(new ushort[] { 0x1111, 0x3333 }, processed);
+		}
+		finally
+		{
+			release.TrySetResult(true);
+			await ((IAsyncDisposable) server).DisposeAsync();
+		}
 	}
 
 	[Fact]

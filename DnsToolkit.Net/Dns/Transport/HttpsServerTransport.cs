@@ -42,6 +42,7 @@ public class HttpsServerTransport : IAsyncClosableServerTransport, IAsyncDisposa
 	private readonly SslProtocols _sslProtocols;
 	private readonly TimeSpan _shutdownTimeout;
 	private readonly long? _maxConcurrentConnections;
+	private readonly int _maxQueuedRequests;
 	private readonly Action<KestrelServerOptions>? _configureKestrel;
 
 	private readonly object _lock = new();
@@ -94,6 +95,7 @@ public class HttpsServerTransport : IAsyncClosableServerTransport, IAsyncDisposa
 		_sslProtocols = options.SslProtocols;
 		_shutdownTimeout = options.ShutdownTimeout;
 		_maxConcurrentConnections = options.MaxConcurrentConnections;
+		_maxQueuedRequests = options.MaxQueuedRequests;
 		_configureKestrel = options.ConfigureKestrel;
 	}
 
@@ -153,11 +155,20 @@ public class HttpsServerTransport : IAsyncClosableServerTransport, IAsyncDisposa
 		var tcs = new TaskCompletionSource<DnsRawPackage?>(TaskCreationOptions.RunContinuationsAsynchronously);
 		var connection = new HttpsServerConnection(this, query, tcs);
 
-		// the queue is unbounded, so writing only fails once the transport is closing
+		// writing fails, if the queue is full or the transport is closing
 		if (!connectionQueue.Writer.TryWrite(connection))
 			throw new EndpointRouteBuilderExtensions.ServiceUnavailableException();
 
-		return await tcs.Task.WaitAsync(token).ConfigureAwait(false);
+		try
+		{
+			return await tcs.Task.WaitAsync(token).ConfigureAwait(false);
+		}
+		catch (OperationCanceledException) when (token.IsCancellationRequested)
+		{
+			// the client aborted the request, so the server skips it, if it is still queued
+			connection.Abandon();
+			throw;
+		}
 	}
 
 	/// <summary>
@@ -241,7 +252,9 @@ public class HttpsServerTransport : IAsyncClosableServerTransport, IAsyncDisposa
 			if (_run != null)
 				throw new InvalidOperationException("The transport is already bound");
 
-			var connectionQueue = Channel.CreateUnbounded<HttpsServerConnection>();
+			// With HTTP/2 a client can send many requests on one connection, so the limit of the connections does not limit the
+			// requests. The queue is bounded, so a full queue rejects further requests instead of growing without limit.
+			var connectionQueue = Channel.CreateBounded<HttpsServerConnection>(new BoundedChannelOptions(_maxQueuedRequests) { FullMode = BoundedChannelFullMode.Wait });
 			var app = CreateApplication(connectionQueue);
 
 			try
@@ -316,8 +329,17 @@ public class HttpsServerTransport : IAsyncClosableServerTransport, IAsyncDisposa
 	{
 		var connectionQueue = Volatile.Read(ref _run)?.ConnectionQueue ?? throw new InvalidOperationException("The transport is not bound");
 
-		await connectionQueue.Reader.WaitToReadAsync(token).ConfigureAwait(false);
-		return connectionQueue.Reader.TryRead(out var connection) ? connection : null;
+		while (await connectionQueue.Reader.WaitToReadAsync(token).ConfigureAwait(false))
+		{
+			while (connectionQueue.Reader.TryRead(out var connection))
+			{
+				// the requests, which the clients aborted while they were queued, are not processed anymore
+				if (!connection.IsAbandoned)
+					return connection;
+			}
+		}
+
+		return null;
 	}
 
 	private class HttpsServerConnection : IServerConnection
@@ -340,6 +362,16 @@ public class HttpsServerTransport : IAsyncClosableServerTransport, IAsyncDisposa
 		public void Reject()
 		{
 			_tcs.TrySetException(new EndpointRouteBuilderExtensions.ServiceUnavailableException());
+		}
+
+		/// <summary>
+		///   True, if the client aborted the request
+		/// </summary>
+		public bool IsAbandoned => _tcs.Task.IsCanceled;
+
+		public void Abandon()
+		{
+			_tcs.TrySetCanceled();
 		}
 
 		public IServerTransport Transport { get; }

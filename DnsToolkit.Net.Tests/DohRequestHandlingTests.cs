@@ -47,6 +47,39 @@ public class DohRequestHandlingTests
 	}
 
 	[Fact]
+	public async Task WrongContentType_IsRejected_WithoutReadingTheBody()
+	{
+		var body = new SimulatedBody(Query(0x1111));
+		var request = CreatePostRequest(body);
+		request.Context.Request.ContentType = "text/plain";
+
+		await HandleAsync(request);
+
+		Assert.Equal(StatusCodes.Status415UnsupportedMediaType, request.Context.Response.StatusCode);
+		Assert.Equal(0, body.BytesRead);
+		Assert.Null(request.ReceivedQuery);
+	}
+
+	[Fact]
+	public async Task GetRequest_IsPassedToTheHandler_WithoutContentType()
+	{
+		var query = Query(0x1111);
+		var context = new DefaultHttpContext
+		{
+			RequestServices = new ServiceCollection().AddLogging().BuildServiceProvider(),
+		};
+		context.Request.Method = "GET";
+		context.Request.QueryString = new QueryString("?dns=" + Convert.ToBase64String(query).TrimEnd('=').Replace('+', '-').Replace('/', '_'));
+		context.Response.Body = new MemoryStream();
+		var request = new SimulatedRequest(context, new SimulatedBodySizeFeature(30_000_000, false));
+
+		await HandleAsync(request);
+
+		Assert.Equal(StatusCodes.Status200OK, request.Context.Response.StatusCode);
+		Assert.Equal(query, request.ReceivedQuery!.ToArraySegment(false).ToArray());
+	}
+
+	[Fact]
 	public async Task BodySizeLimit_IsLoweredToDnsMaximum_BeforeReading()
 	{
 		var body = new SimulatedBody(Query(0x1111));

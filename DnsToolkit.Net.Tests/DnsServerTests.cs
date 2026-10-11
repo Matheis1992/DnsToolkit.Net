@@ -187,6 +187,70 @@ public class DnsServerTests
 		await AssertStopWaitsForQueryInProgressAsync(server => ((IAsyncDisposable) server).DisposeAsync().AsTask());
 	}
 
+	[Fact]
+	public async Task QueriesOfOneConnection_AreLimitedByMaxConcurrentQueriesPerConnection()
+	{
+		// e.g. queries pipelined by a client over TCP
+		var connection = new FakeServerConnection(Enumerable.Range(0, 10).Select(_ => CreateQueryPackage()).ToArray());
+		var transport = new FakeServerTransport(connection);
+		var released = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+		var started = 0;
+
+		var server = new DnsServer(transport) { MaxConcurrentQueriesPerConnection = 3 };
+		server.QueryReceived += async (sender, e) =>
+		{
+			Interlocked.Increment(ref started);
+			await released.Task;
+			await AnswerQuery(sender, e);
+		};
+		server.Start();
+
+		try
+		{
+			await Task.Delay(500);
+
+			// before, all queries of the connection were processed at the same time
+			Assert.Equal(3, Volatile.Read(ref started));
+
+			released.TrySetResult(true);
+
+			Assert.True(await connection.WaitForDisposeAsync(TimeSpan.FromSeconds(5)), "The connection was not disposed after all queries were answered");
+			Assert.Equal(10, connection.SentPackages);
+		}
+		finally
+		{
+			released.TrySetResult(true);
+			((IDisposable) server).Dispose();
+		}
+	}
+
+	[Fact]
+	public async Task DisposeAsync_AbortsQueryInProgress_AfterTheStopTimeout()
+	{
+		var handler = new BlockingQueryHandler();
+		var connection = new FakeServerConnection(CreateQueryPackage());
+		var transport = new FakeServerTransport(connection);
+
+		var server = new DnsServer(transport) { StopTimeout = TimeSpan.FromMilliseconds(300) };
+		server.QueryReceived += handler.HandleAsync;
+		server.Start();
+
+		try
+		{
+			Assert.True(await handler.WaitForQueryAsync(TimeSpan.FromSeconds(5)), "The query was not received");
+
+			// before, disposing waited as long as the handler, like Stop it aborts the connection after the timeout now
+			await CompletesWithinAsync(((IAsyncDisposable) server).DisposeAsync().AsTask(), TimeSpan.FromSeconds(5));
+
+			Assert.True(await connection.WaitForDisposeAsync(TimeSpan.Zero), "The connection was not aborted");
+			Assert.Equal(1, transport.CloseCalls);
+		}
+		finally
+		{
+			handler.Release();
+		}
+	}
+
 	private static async Task AssertStopWaitsForQueryInProgressAsync(Func<DnsServer, Task> stop)
 	{
 		var handler = new BlockingQueryHandler();

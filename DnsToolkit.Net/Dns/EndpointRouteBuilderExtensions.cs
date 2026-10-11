@@ -96,7 +96,6 @@ public static class EndpointRouteBuilderExtensions
 	// internal for the tests, which call it with a simulated request
 	internal static async Task HandleRequestAsync(HttpContext ctx, CancellationToken token, DnsRawPackageDelegate handler)
 	{
-		string? contentType;
 		byte[] content;
 
 		if (ctx.Request.Method == HttpMethod.Get.Method)
@@ -120,11 +119,16 @@ public static class EndpointRouteBuilderExtensions
 				await Results.BadRequest().ExecuteAsync(ctx).ConfigureAwait(false);
 				return;
 			}
-
-			contentType = _DOH_CONTENT_TYPE;
 		}
 		else if (ctx.Request.Method == HttpMethod.Post.Method)
 		{
+			// checked before the body is read, so the body of a request, which is rejected anyway, is not read
+			if (ctx.Request.ContentType != _DOH_CONTENT_TYPE)
+			{
+				await Results.StatusCode((int) HttpStatusCode.UnsupportedMediaType).ExecuteAsync(ctx).ConfigureAwait(false);
+				return;
+			}
+
 			if (ctx.Request.ContentLength > _MAX_MESSAGE_SIZE)
 			{
 				await Results.StatusCode((int) HttpStatusCode.RequestEntityTooLarge).ExecuteAsync(ctx).ConfigureAwait(false);
@@ -153,18 +157,10 @@ public static class EndpointRouteBuilderExtensions
 			}
 
 			content = ms.ToArray();
-
-			contentType = ctx.Request.ContentType;
 		}
 		else
 		{
 			await Results.StatusCode((int) HttpStatusCode.MethodNotAllowed).ExecuteAsync(ctx).ConfigureAwait(false);
-			return;
-		}
-
-		if (contentType != _DOH_CONTENT_TYPE)
-		{
-			await Results.StatusCode((int) HttpStatusCode.UnsupportedMediaType).ExecuteAsync(ctx).ConfigureAwait(false);
 			return;
 		}
 

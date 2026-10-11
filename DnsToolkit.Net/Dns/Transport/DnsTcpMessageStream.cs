@@ -140,8 +140,17 @@ internal sealed class DnsTcpMessageStream : IDisposable
 		await _writeLock.WaitAsync(token).ConfigureAwait(false);
 		try
 		{
+			// Not all streams observe the token (e.g. NetworkStream on .NET Framework), closing the stream aborts the write in any case
+			using var registration = token.Register(Dispose);
+
 			await _stream.WriteAsync(messageWithLengthHeader.Array!, messageWithLengthHeader.Offset, messageWithLengthHeader.Count, token).ConfigureAwait(false);
 			await _stream.FlushAsync(token).ConfigureAwait(false);
+		}
+		catch (Exception) when (token.IsCancellationRequested)
+		{
+			// the stream was closed by the cancellation, which may result in other exceptions than OperationCanceledException
+			Dispose();
+			throw new OperationCanceledException(token);
 		}
 		catch
 		{
@@ -185,13 +194,5 @@ internal sealed class DnsTcpMessageStream : IDisposable
 
 		// The pipe reader is not completed here, as a pending read may still use its buffers. They are left to the garbage collector.
 		_stream.TryDispose();
-	}
-
-	/// <summary>
-	///   Converts a timeout in milliseconds, where 0 or less means no timeout like the timeouts of sockets
-	/// </summary>
-	public static TimeSpan ToTimeout(int milliseconds)
-	{
-		return milliseconds > 0 ? TimeSpan.FromMilliseconds(milliseconds) : Timeout.InfiniteTimeSpan;
 	}
 }

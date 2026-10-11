@@ -211,8 +211,8 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 				// alive nor the token cancel the read itself, as canceling closes the stream, but the responses to the queries
 				// in progress still have to be sent, before the connection is closed.
 				var read = _messageStream.ReadMessageAsync(
-					DnsTcpMessageStream.ToTimeout(TransportInternal.KeepAlive),
-					DnsTcpMessageStream.ToTimeout(TransportInternal.Timeout),
+					TaskExtensions.ToTimeout(TransportInternal.KeepAlive),
+					TaskExtensions.ToTimeout(TransportInternal.Timeout),
 					CancellationToken.None);
 
 				byte[]? message;
@@ -249,8 +249,14 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 
 			try
 			{
+				// A client, which does not read its responses, would otherwise keep the connection and its slot forever. The
+				// timeouts of the socket do not apply to asynchronous writes.
+				using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+				if (TransportInternal.Timeout > 0)
+					timeoutCts.CancelAfter(TransportInternal.Timeout);
+
 				// serialized by the message stream, as responses to pipelined queries are sent concurrently
-				await _messageStream.WriteMessageAsync(package.ToArraySegment(true), token).ConfigureAwait(false);
+				await _messageStream.WriteMessageAsync(package.ToArraySegment(true), timeoutCts.Token).ConfigureAwait(false);
 				return true;
 			}
 			catch

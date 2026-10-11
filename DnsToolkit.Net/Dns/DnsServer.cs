@@ -55,7 +55,10 @@ namespace DnsToolkit.Net.Dns
 
 		private readonly ActiveConnections _activeConnections = new();
 
-		private static readonly TimeSpan _stopTimeout = TimeSpan.FromSeconds(5);
+		/// <summary>
+		///   The time, after which <see cref="Stop" /> and disposing abort the remaining connections
+		/// </summary>
+		internal TimeSpan StopTimeout { get; set; } = TimeSpan.FromSeconds(5);
 
 		// serializes starting and stopping
 		private readonly object _lifecycleLock = new();
@@ -118,6 +121,27 @@ namespace DnsToolkit.Net.Dns
 		private int _maxConcurrentConnectionsPerTransport = 1000;
 
 		/// <summary>
+		///   The maximum number of queries of one connection, which are processed at the same time, e.g. the queries pipelined
+		///   by a client over TCP or TLS. If the limit is reached, the next query of the connection is read only after another
+		///   one was answered, so the client waits. Otherwise, a single connection could start any number of queries, although
+		///   it counts as one connection only. It has to be set before the server is started.
+		///   Default: 100
+		/// </summary>
+		public int MaxConcurrentQueriesPerConnection
+		{
+			get => _maxConcurrentQueriesPerConnection;
+			set
+			{
+				if (value < 1)
+					throw new ArgumentOutOfRangeException(nameof(value), "At least one query has to be allowed");
+
+				_maxConcurrentQueriesPerConnection = value;
+			}
+		}
+
+		private int _maxConcurrentQueriesPerConnection = 100;
+
+		/// <summary>
 		///   Starts the server. After it was stopped, it can be started again, if its transports can be bound again after
 		///   they were closed, like all transports of this library.
 		/// </summary>
@@ -144,7 +168,8 @@ namespace DnsToolkit.Net.Dns
 				var token = _serverCancellationTokenSource.Token;
 				var abortToken = _abortCancellationTokenSource.Token;
 				var maxConnections = MaxConcurrentConnectionsPerTransport;
-				_transportTasks = _transports.Select(t => Task.Run(() => ConnectionLoopAsync(t, maxConnections, token, abortToken))).ToArray();
+				var maxQueriesPerConnection = MaxConcurrentQueriesPerConnection;
+				_transportTasks = _transports.Select(t => Task.Run(() => ConnectionLoopAsync(t, maxConnections, maxQueriesPerConnection, token, abortToken))).ToArray();
 
 				_isStarted = true;
 				_stopTask = null;
@@ -190,7 +215,7 @@ namespace DnsToolkit.Net.Dns
 		/// </summary>
 		public void Stop()
 		{
-			using var timeoutCts = new CancellationTokenSource(_stopTimeout);
+			using var timeoutCts = new CancellationTokenSource(StopTimeout);
 
 			try
 			{
@@ -388,7 +413,7 @@ namespace DnsToolkit.Net.Dns
 			}
 		}
 
-		private async Task ConnectionLoopAsync(IServerTransport transport, int maxConnections, CancellationToken token, CancellationToken abortToken)
+		private async Task ConnectionLoopAsync(IServerTransport transport, int maxConnections, int maxQueriesPerConnection, CancellationToken token, CancellationToken abortToken)
 		{
 			var failedAcceptCount = 0;
 
@@ -453,7 +478,7 @@ namespace DnsToolkit.Net.Dns
 				{
 					connectionSlots.Release();
 					_activeConnections.Remove(connection);
-				}, token, abortToken));
+				}, maxQueriesPerConnection, token, abortToken));
 			}
 		}
 
@@ -501,12 +526,15 @@ namespace DnsToolkit.Net.Dns
 			}
 		}
 
-		private async Task ProcessConnectionAsync(IServerConnection connection, Action onDisposed, CancellationToken token, CancellationToken abortToken)
+		private async Task ProcessConnectionAsync(IServerConnection connection, Action onDisposed, int maxQueries, CancellationToken token, CancellationToken abortToken)
 		{
 			// The receive loop holds one reference and every query in progress holds another one,
 			// so the connection is disposed after the loop ended and all queries are answered
 			var refCount = new RefCountDispose(connection, onDisposed);
 			refCount.Increment();
+
+			// One slot per query in progress. It is not disposed, as queries may still release their slot after the loop ended.
+			var querySlots = new SemaphoreSlim(maxQueries, maxQueries);
 
 			try
 			{
@@ -521,16 +549,30 @@ namespace DnsToolkit.Net.Dns
 
 				while (connection.CanRead)
 				{
+					// the next query is read only, if it can be processed, so the client waits meanwhile
+					try
+					{
+						await querySlots.WaitAsync(token).ConfigureAwait(false);
+					}
+					catch (OperationCanceledException) when (token.IsCancellationRequested)
+					{
+						// the server is stopping, so no further queries are read
+						break;
+					}
+
 					var queryPackage = await connection.ReceiveAsync(token).ConfigureAwait(false);
 
 					if (queryPackage == null)
+					{
+						querySlots.Release();
 						break;
+					}
 
 					refCount.Increment();
 
-					// Not bound to a token, as ProcessRawPackageAsync has to release its reference in any case.
+					// Not bound to a token, as ProcessRawPackageAsync has to release its reference and its slot in any case.
 					// It sends the response also while the server is stopping, only aborting the stop cancels it.
-					_ = Task.Run(() => ProcessRawPackageAsync(connection, queryPackage, refCount, abortToken));
+					_ = Task.Run(() => ProcessRawPackageAsync(connection, queryPackage, refCount, querySlots, abortToken));
 				}
 			}
 			catch (Exception ex)
@@ -543,7 +585,7 @@ namespace DnsToolkit.Net.Dns
 			}
 		}
 
-		private async Task ProcessRawPackageAsync(IServerConnection connection, DnsReceivedRawPackage queryPackage, RefCountDispose refCount, CancellationToken abortToken)
+		private async Task ProcessRawPackageAsync(IServerConnection connection, DnsReceivedRawPackage queryPackage, RefCountDispose refCount, SemaphoreSlim querySlots, CancellationToken abortToken)
 		{
 			try
 			{
@@ -702,6 +744,7 @@ namespace DnsToolkit.Net.Dns
 			}
 			finally
 			{
+				querySlots.Release();
 				refCount.Decrement();
 			}
 		}
@@ -813,7 +856,8 @@ namespace DnsToolkit.Net.Dns
 		}
 
 		/// <summary>
-		///   Stops the server like <see cref="StopAsync" /> and disposes the transports
+		///   Stops the server like <see cref="StopAsync" /> and disposes the transports. Like <see cref="Stop" />, the
+		///   remaining connections are aborted after 5 seconds.
 		/// </summary>
 		async ValueTask IAsyncDisposable.DisposeAsync()
 		{
@@ -821,7 +865,17 @@ namespace DnsToolkit.Net.Dns
 				return;
 
 			// waits for a stop in progress as well, so nothing is disposed, which it still uses
-			await StopAsync().ConfigureAwait(false);
+			using (var timeoutCts = new CancellationTokenSource(StopTimeout))
+			{
+				try
+				{
+					await StopAsync(timeoutCts.Token).ConfigureAwait(false);
+				}
+				catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
+				{
+					// the remaining connections were aborted
+				}
+			}
 
 			foreach (var transport in _transports)
 			{
