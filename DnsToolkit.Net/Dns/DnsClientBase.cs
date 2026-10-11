@@ -83,12 +83,14 @@ namespace DnsToolkit.Net.Dns
 		// ReSharper disable once InconsistentNaming
 		public bool Is0x20ValidationEnabled { get; set; }
 
+		[Obsolete("Blocks the calling thread while waiting for the DNS responses. Use SendMessageAsync instead.")]
 		protected TMessage? SendMessage<TMessage>(TMessage query)
 			where TMessage : DnsMessageBase, new()
 		{
 			return SendMessageAsync<TMessage>(query, CancellationToken.None).GetAwaiter().GetResult();
 		}
 
+		[Obsolete("Blocks the calling thread while waiting for the DNS responses. Use SendMessageParallelAsync instead.")]
 		protected List<TMessage> SendMessageParallel<TMessage>(TMessage message)
 			where TMessage : DnsMessageBase, new()
 		{

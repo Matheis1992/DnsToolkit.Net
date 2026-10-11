@@ -144,6 +144,7 @@ namespace DnsToolkit.Net.Net
 		///   A Boolean value that specifies whether the certificate revocation list is
 		///   checked during authentication.
 		/// </param>
+		[Obsolete("Blocks the calling thread while waiting for the DNS responses. Use AuthenticateAsClientAsync instead.")]
 		public void AuthenticateAsClient(string targetHost, int port, ProtocolType protocol = ProtocolType.Tcp, X509CertificateCollection? clientCertificates = null, SslProtocols enabledSslProtocols = DefaultSslProtocols, bool checkCertificateRevocation = false)
 		{
 			_tlsaRecords = _resolver.ResolveSecure<TlsaRecord>(DomainName.Parse("_" + port + "._" + EnumHelper<ProtocolType>.ToString(protocol).ToLowerInvariant() + "." + targetHost), RecordType.Tlsa);

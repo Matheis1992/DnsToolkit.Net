@@ -55,6 +55,7 @@ namespace DnsToolkit.Net.Dns
 		/// <param name="name"> Name, that should be queried </param>
 		/// <param name="recordType"> Type the should be queried </param>
 		/// <returns> All available responses on the local network </returns>
+		[Obsolete("Blocks the calling thread while waiting for the DNS responses. Use ResolveAsync instead.")]
 		public List<MulticastDnsMessage> Resolve(DomainName name, RecordType recordType = RecordType.Any)
 		{
 			_ = name ?? throw new ArgumentNullException(nameof(name), "Name must be provided");

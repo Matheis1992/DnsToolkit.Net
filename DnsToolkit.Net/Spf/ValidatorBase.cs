@@ -84,6 +84,7 @@ namespace DnsToolkit.Net.Spf
 		/// <param name="sender"> The "MAIL FROM" or "HELO" identity </param>
 		/// <param name="expandExplanation"> A value indicating if the explanation should be retrieved in case of Fail</param>
 		/// <returns> The result of the evaluation </returns>
+		[Obsolete("Blocks the calling thread while waiting for the DNS responses. Use CheckHostAsync instead.")]
 		public ValidationResult CheckHost(IPAddress ip, DomainName domain, string sender, bool expandExplanation = false)
 		{
 			return CheckHostInternalAsync(ip, domain, sender, expandExplanation, new State(), default).GetAwaiter().GetResult();
@@ -97,6 +98,7 @@ namespace DnsToolkit.Net.Spf
 		/// <param name="sender"> The "MAIL FROM" or "HELO" identity </param>
 		/// <param name="expandExplanation"> A value indicating if the explanation should be retrieved in case of Fail</param>
 		/// <returns> The result of the evaluation </returns>
+		[Obsolete("Blocks the calling thread while waiting for the DNS responses. Use CheckHostAsync instead.")]
 		public ValidationResult CheckHost(IPAddress ip, string domain, string sender, bool expandExplanation = false)
 		{
 			return CheckHost(ip, DomainName.Parse(domain), sender, expandExplanation);
