@@ -22,7 +22,7 @@
     <Copyright>Copyright 2010..2024 Alexander Reinert, 2026 Matheis1992</Copyright>
     <!-- a new package, so it starts at 1.0.0 instead of continuing the versions of ARSoft.Tools.Net; the suffix is removed for the release -->
     <VersionPrefix>1.0.0</VersionPrefix>
-    <VersionSuffix>preview.1</VersionSuffix>
+    <VersionSuffix>preview.2</VersionSuffix>
   </PropertyGroup>
 
   <ItemGroup>
@@ -53,12 +53,16 @@
     <Compile Remove="Dns\Transport\HttpsServerTransportOptions.cs" />
   </ItemGroup>
 
+  <!-- In the root of the package. As content files, NuGet copied them into the projects and the output of every user of the package. -->
   <ItemGroup>
-    <Content Include="..\LICENSE" CopyToOutputDirectory="PreserveNewest" />
-    <Content Include="..\NOTICE" CopyToOutputDirectory="PreserveNewest" />
-  </ItemGroup>
-
-  <ItemGroup>
+    <None Include="..\LICENSE">
+      <Pack>True</Pack>
+      <PackagePath>\</PackagePath>
+    </None>
+    <None Include="..\NOTICE">
+      <Pack>True</Pack>
+      <PackagePath>\</PackagePath>
+    </None>
     <None Include="..\README.md">
       <Pack>True</Pack>
       <PackagePath>\</PackagePath>

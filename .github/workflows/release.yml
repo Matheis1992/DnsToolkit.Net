@@ -1,0 +1,60 @@
+name: Publish to NuGet
+
+# Publishes the package to nuget.org, when a GitHub release is published. It uses Trusted Publishing: nuget.org exchanges the
+# OIDC token of this workflow for an API key, which is valid for 1 hour, so no API key is stored in the repository.
+on:
+  release:
+    types: [ published ]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish to nuget.org
+    # Windows, so the tests also run on net48 against the netstandard2.0 build, like in the CI
+    runs-on: windows-latest
+    timeout-minutes: 20
+    # the Trusted Publishing policy on nuget.org is restricted to this environment
+    environment: release
+    permissions:
+      contents: read
+      id-token: write  # for the OIDC token, which nuget.org exchanges for a temporary API key
+    env:
+      # passed as a variable, not inserted into the scripts
+      TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      # GeneratePackageOnBuild creates bin/Release/DnsToolkit.Net.<version>.nupkg
+      - name: Build
+        run: dotnet build DnsToolkit.Net.sln -c Release
+
+      - name: Test
+        run: dotnet test DnsToolkit.Net.Tests/DnsToolkit.Net.Tests.csproj -c Release --no-build --blame-hang-timeout 60s
+
+      # The version in the project file has to match the tag, e.g. v1.0.0-preview.2, so a release without the version
+      # change cannot publish the package of another version
+      - name: Find the package of the tag
+        id: package
+        shell: pwsh
+        run: |
+          $package = "bin/Release/DnsToolkit.Net.$($env:TAG.TrimStart('v')).nupkg"
+          if (-not (Test-Path $package)) { throw "The build created no package for the tag $env:TAG" }
+          "path=$package" >> $env:GITHUB_OUTPUT
+
+      # right before the push, as the API key is only valid for 1 hour
+      - name: NuGet login (OIDC to temporary API key)
+        uses: NuGet/login@v1
+        id: login
+        with:
+          user: ${{ secrets.NUGET_USER }}
+
+      - name: Push to nuget.org
+        run: dotnet nuget push "${{ steps.package.outputs.path }}" --api-key ${{ steps.login.outputs.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json
