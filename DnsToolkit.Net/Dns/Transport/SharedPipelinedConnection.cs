@@ -30,7 +30,11 @@ internal sealed class SharedPipelinedConnection : IPooledConnection
 {
 	private readonly IPipelineableClientConnection _connection;
 	private readonly Action<SharedPipelinedConnection> _onUnusable;
-	private readonly TaskIdleCompletionSource _idleTcs;
+
+	// Canceled after the idle timeout, which only runs while no query is in progress, so the connection is closed then.
+	// CancelAfter restarts the timer with every call, an infinite delay pauses it.
+	private readonly CancellationTokenSource _idleCts = new();
+	private TimeSpan _idleTimeout;
 
 	// canceled when the connection is closed, so the pending read of the receive loop ends
 	private readonly CancellationTokenSource _closeCts = new();
@@ -60,12 +64,12 @@ internal sealed class SharedPipelinedConnection : IPooledConnection
 		_connection = connection;
 		_onUnusable = onUnusable;
 
-		_idleTcs = new TaskIdleCompletionSource(idleTimeout);
-		_idleTcs.Task.ContinueWith(_ => MarkFaulty(), CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
+		_idleTimeout = idleTimeout;
+		_idleCts.Token.Register(MarkFaulty);
 
 		// e.g. all queries waiting for the connect were canceled meanwhile
 		if (initialIdleTimeout.HasValue)
-			_idleTcs.Start(initialIdleTimeout.Value);
+			_idleCts.CancelAfter(initialIdleTimeout.Value);
 	}
 
 	private void ReportUnusable()
@@ -160,7 +164,7 @@ internal sealed class SharedPipelinedConnection : IPooledConnection
 			_queries.Add(identification, query);
 
 			if (_queries.Count == 1)
-				_idleTcs.Pause();
+				_idleCts.CancelAfter(Timeout.InfiniteTimeSpan);
 		}
 
 		return query;
@@ -174,7 +178,7 @@ internal sealed class SharedPipelinedConnection : IPooledConnection
 		lock (_lock)
 		{
 			if (_queries.Remove(query.Identification, query) && (_queries.Count == 0))
-				_idleTcs.Start();
+				_idleCts.CancelAfter(_idleTimeout);
 		}
 
 		query.Complete();
@@ -255,17 +259,18 @@ internal sealed class SharedPipelinedConnection : IPooledConnection
 			if (timeout.Value <= TimeSpan.Zero)
 			{
 				_isDraining = true;
-				_idleTcs.ChangeIdleTimeout(TimeSpan.Zero);
+				_idleTimeout = TimeSpan.Zero;
 			}
 			else
 			{
 				// a tenth earlier, so the connection is not closed by the server, while a query is sent
-				_idleTcs.ChangeIdleTimeout(timeout.Value - TimeSpan.FromTicks(timeout.Value.Ticks / 10));
+				_idleTimeout = timeout.Value - TimeSpan.FromTicks(timeout.Value.Ticks / 10);
 			}
 
-			// The timer runs only while no query is in progress, so the outstanding responses are still received
+			// The timer runs only while no query is in progress, so the outstanding responses are still received. Even with
+			// a delay of 0, the source is canceled by its timer, so MarkFaulty does not run inside of this lock.
 			if (_queries.Count == 0)
-				_idleTcs.Start();
+				_idleCts.CancelAfter(_idleTimeout);
 
 			isDraining = _isDraining;
 		}
@@ -297,7 +302,11 @@ internal sealed class SharedPipelinedConnection : IPooledConnection
 
 		_closeCts.Cancel();
 		_connection.MarkFaulty();
-		_idleTcs.TryDispose();
+
+		// Stops the idle timer. The source is not disposed, as this may run in its own callback. The callback is MarkFaulty
+		// itself, which finds the connection closed already.
+		_idleCts.Cancel();
+
 		_connection.TryDispose();
 
 		foreach (var query in queries)

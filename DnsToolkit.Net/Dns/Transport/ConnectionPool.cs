@@ -16,6 +16,7 @@
 // limitations under the License.
 #endregion
 
+using System.Collections.Concurrent;
 using System.Net;
 
 namespace DnsToolkit.Net.Dns;
@@ -44,19 +45,14 @@ internal interface IPooledConnection
 internal sealed class ConnectionPool<TConnection>
 	where TConnection : class, IPooledConnection
 {
-	private readonly Dictionary<IPAddress, Task<TConnection?>> _pool = new();
+	// GetOrAdd may create an entry, which is not added, so the connect is started lazily. Only the connect of the entry in
+	// the pool is started, so concurrent queries never establish a second connection, which nobody would use or close.
+	private readonly ConcurrentDictionary<IPAddress, Lazy<Task<TConnection?>>> _pool = new();
 
 	/// <summary>
 	///   The number of servers, for which a connection is established or being established
 	/// </summary>
-	internal int Count
-	{
-		get
-		{
-			lock (_pool)
-				return _pool.Count;
-		}
-	}
+	internal int Count => _pool.Count;
 
 	/// <summary>
 	///   Returns the connection to the server and establishes it, if the pool does not contain one yet
@@ -70,22 +66,8 @@ internal sealed class ConnectionPool<TConnection>
 	/// <returns>The connection, or null if it could not be established</returns>
 	public async Task<TConnection?> GetOrConnectAsync(IPAddress address, Func<Task<TConnection?>> connect, CancellationToken token)
 	{
-		Task<TConnection?>? connectTask;
-		Task<Task<TConnection?>>? startConnect = null;
-
-		lock (_pool)
-		{
-			if (!_pool.TryGetValue(address, out connectTask))
-			{
-				// Only the connect added to the pool is started, so concurrent queries never establish a second connection,
-				// which nobody would use or close. It is started outside of the lock, as it may complete synchronously.
-				startConnect = new Task<Task<TConnection?>>(connect);
-				connectTask = startConnect.Unwrap();
-				_pool.Add(address, connectTask);
-			}
-		}
-
-		startConnect?.Start(TaskScheduler.Default);
+		var entry = _pool.GetOrAdd(address, _ => new Lazy<Task<TConnection?>>(() => Task.Run(connect)));
+		var connectTask = entry.Value;
 
 		TConnection? connection;
 		try
@@ -95,12 +77,12 @@ internal sealed class ConnectionPool<TConnection>
 		catch when (connectTask.IsFaulted || connectTask.IsCanceled)
 		{
 			// otherwise every further query would get the failed connect
-			Remove(address, connectTask);
+			Remove(address, entry);
 			throw;
 		}
 
 		if ((connection == null) || !connection.IsAlive)
-			Remove(address, connectTask);
+			Remove(address, entry);
 
 		return connection;
 	}
@@ -114,25 +96,21 @@ internal sealed class ConnectionPool<TConnection>
 	/// <returns>The connection, or null if the pool contains no usable connection to the server</returns>
 	public async Task<TConnection?> GetPooledAsync(IPAddress address, CancellationToken token)
 	{
-		Task<TConnection?>? connectTask;
+		if (!_pool.TryGetValue(address, out var entry))
+			return null;
 
-		lock (_pool)
+		var connectTask = entry.Value;
+
+		if (connectTask.IsCompleted)
 		{
-			if (!_pool.TryGetValue(address, out connectTask))
-				return null;
+			var connection = connectTask.Status == TaskStatus.RanToCompletion ? connectTask.Result : null;
+			if ((connection != null) && connection.IsAlive)
+				return connection;
 
-			// The result is only read of a completed connect, a pending one must not be awaited inside the lock
-			if (connectTask.IsCompleted)
-			{
-				var connection = connectTask.Status == TaskStatus.RanToCompletion ? connectTask.Result : null;
-				if ((connection != null) && connection.IsAlive)
-					return connection;
-
-				// Only removed, not closed: a connection, which takes no further queries, may still receive the responses
-				// of the queries in progress. It closes itself afterwards.
-				_pool.Remove(address);
-				return null;
-			}
+			// Only removed, not closed: a connection, which takes no further queries, may still receive the responses
+			// of the queries in progress. It closes itself afterwards.
+			Remove(address, entry);
+			return null;
 		}
 
 		try
@@ -143,7 +121,7 @@ internal sealed class ConnectionPool<TConnection>
 		catch when (connectTask.IsFaulted || connectTask.IsCanceled)
 		{
 			// the failure of the connect is reported to the queries, which established it
-			Remove(address, connectTask);
+			Remove(address, entry);
 			return null;
 		}
 	}
@@ -154,25 +132,23 @@ internal sealed class ConnectionPool<TConnection>
 	/// </summary>
 	public void Remove(IPAddress address, TConnection connection)
 	{
-		lock (_pool)
+		// The result is only read of a completed connect, a pending one is not awaited
+		if (_pool.TryGetValue(address, out var entry)
+		    && entry.IsValueCreated
+		    && (entry.Value.Status == TaskStatus.RanToCompletion)
+		    && ReferenceEquals(entry.Value.Result, connection))
 		{
-			// The result is only read of a completed connect, a pending one must not be awaited inside the lock
-			if (_pool.TryGetValue(address, out var connectTask)
-			    && (connectTask.Status == TaskStatus.RanToCompletion)
-			    && ReferenceEquals(connectTask.Result, connection))
-			{
-				_pool.Remove(address);
-			}
+			Remove(address, entry);
 		}
 	}
 
-	private void Remove(IPAddress address, Task<TConnection?> connectTask)
+	/// <summary>
+	///   Removes the entry, but not a newer entry of the server, which replaced it meanwhile
+	/// </summary>
+	private void Remove(IPAddress address, Lazy<Task<TConnection?>> entry)
 	{
-		lock (_pool)
-		{
-			if (_pool.TryGetValue(address, out var pooledTask) && (pooledTask == connectTask))
-				_pool.Remove(address);
-		}
+		// removes the pair only, if the value is still the same, on all target frameworks
+		((ICollection<KeyValuePair<IPAddress, Lazy<Task<TConnection?>>>>) _pool).Remove(new KeyValuePair<IPAddress, Lazy<Task<TConnection?>>>(address, entry));
 	}
 
 	/// <summary>
@@ -180,17 +156,12 @@ internal sealed class ConnectionPool<TConnection>
 	/// </summary>
 	public void Clear()
 	{
-		List<Task<TConnection?>> connectTasks;
-
-		lock (_pool)
+		foreach (var address in _pool.Keys)
 		{
-			connectTasks = _pool.Values.ToList();
-			_pool.Clear();
-		}
-
-		foreach (var connectTask in connectTasks)
-		{
-			connectTask.ContinueWith(t => t.Result?.MarkFaulty(), CancellationToken.None, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default);
+			// The value of an entry, whose connect is not started yet, is about to be read by the query, which added it,
+			// so reading it here starts no connect, which would not be started anyway.
+			if (_pool.TryRemove(address, out var entry))
+				entry.Value.ContinueWith(t => t.Result?.MarkFaulty(), CancellationToken.None, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default);
 		}
 	}
 }
