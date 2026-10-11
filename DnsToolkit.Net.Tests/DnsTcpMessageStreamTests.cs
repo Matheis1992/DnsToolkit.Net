@@ -32,8 +32,8 @@ public class DnsTcpMessageStreamTests
 		using var stream = new ScriptedReadStream(message, chunkSize: 1);
 		using var messageStream = new DnsTcpMessageStream(stream);
 
-		Assert.Equal(message, await messageStream.ReadMessageAsync(_infinite, _infinite, default));
-		Assert.Null(await messageStream.ReadMessageAsync(_infinite, _infinite, default));
+		Assert.Equal(message, await messageStream.ReadMessageAsync(_infinite, _infinite, TestToken));
+		Assert.Null(await messageStream.ReadMessageAsync(_infinite, _infinite, TestToken));
 	}
 
 	[Fact]
@@ -44,9 +44,9 @@ public class DnsTcpMessageStreamTests
 		using var messageStream = new DnsTcpMessageStream(stream);
 
 		foreach (var message in messages)
-			Assert.Equal(message, await messageStream.ReadMessageAsync(_infinite, _infinite, default));
+			Assert.Equal(message, await messageStream.ReadMessageAsync(_infinite, _infinite, TestToken));
 
-		Assert.Null(await messageStream.ReadMessageAsync(_infinite, _infinite, default));
+		Assert.Null(await messageStream.ReadMessageAsync(_infinite, _infinite, TestToken));
 	}
 
 	[Fact]
@@ -55,7 +55,7 @@ public class DnsTcpMessageStreamTests
 		using var stream = new ScriptedReadStream(Message(1, 20).Take(10).ToArray(), chunkSize: 3);
 		using var messageStream = new DnsTcpMessageStream(stream);
 
-		Assert.Null(await messageStream.ReadMessageAsync(_infinite, _infinite, default));
+		Assert.Null(await messageStream.ReadMessageAsync(_infinite, _infinite, TestToken));
 	}
 
 	[Fact]
@@ -66,7 +66,7 @@ public class DnsTcpMessageStreamTests
 		using var messageStream = new DnsTcpMessageStream(stream);
 
 		var stopwatch = Stopwatch.StartNew();
-		Assert.Null(await messageStream.ReadMessageAsync(TimeSpan.FromMilliseconds(200), _infinite, default));
+		Assert.Null(await messageStream.ReadMessageAsync(TimeSpan.FromMilliseconds(200), _infinite, TestToken));
 
 		Assert.InRange(stopwatch.Elapsed, TimeSpan.FromMilliseconds(150), TimeSpan.FromSeconds(3));
 
@@ -74,7 +74,7 @@ public class DnsTcpMessageStreamTests
 		Assert.False(stream.IsDisposed);
 
 		// the abandoned read is still pending, before a second read failed with an exception of the pipe reader
-		await Assert.ThrowsAsync<InvalidOperationException>(() => messageStream.ReadMessageAsync(_infinite, _infinite, default));
+		await Assert.ThrowsAsync<InvalidOperationException>(() => messageStream.ReadMessageAsync(_infinite, _infinite, TestToken));
 	}
 
 	[Fact]
@@ -108,7 +108,7 @@ public class DnsTcpMessageStreamTests
 		using var messageStream = new DnsTcpMessageStream(stream);
 
 		var stopwatch = Stopwatch.StartNew();
-		await Assert.ThrowsAnyAsync<OperationCanceledException>(() => messageStream.ReadMessageAsync(_infinite, TimeSpan.FromMilliseconds(200), default));
+		await Assert.ThrowsAnyAsync<OperationCanceledException>(() => messageStream.ReadMessageAsync(_infinite, TimeSpan.FromMilliseconds(200), TestToken));
 
 		Assert.InRange(stopwatch.Elapsed, TimeSpan.FromMilliseconds(150), TimeSpan.FromSeconds(3));
 		Assert.True(stream.IsDisposed);
@@ -122,7 +122,7 @@ public class DnsTcpMessageStreamTests
 		using var stream = new ScriptedReadStream(message, chunkSize: 1, chunkDelay: TimeSpan.FromMilliseconds(100));
 		using var messageStream = new DnsTcpMessageStream(stream);
 
-		Assert.Equal(message, await messageStream.ReadMessageAsync(TimeSpan.FromMilliseconds(300), TimeSpan.FromSeconds(5), default));
+		Assert.Equal(message, await messageStream.ReadMessageAsync(TimeSpan.FromMilliseconds(300), TimeSpan.FromSeconds(5), TestToken));
 	}
 
 	[Fact]
@@ -152,7 +152,7 @@ public class DnsTcpMessageStreamTests
 		using var reader = new DnsTcpMessageStream(new ScriptedReadStream(stream.GetWrittenData(), chunkSize: 4096));
 		var received = new List<byte[]>();
 		byte[]? message;
-		while ((message = await reader.ReadMessageAsync(_infinite, _infinite, default)) != null)
+		while ((message = await reader.ReadMessageAsync(_infinite, _infinite, TestToken)) != null)
 			received.Add(message);
 
 		Assert.Equal(messages.Count, received.Count);
@@ -165,7 +165,7 @@ public class DnsTcpMessageStreamTests
 		using var stream = new BlockingWriteStream();
 		using var messageStream = new DnsTcpMessageStream(stream);
 
-		var first = messageStream.WriteMessageAsync(new ArraySegment<byte>(Message(1, 10)), default);
+		var first = messageStream.WriteMessageAsync(new ArraySegment<byte>(Message(1, 10)), TestToken);
 		await stream.WriteStarted;
 
 		using (var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(100)))
@@ -174,7 +174,7 @@ public class DnsTcpMessageStreamTests
 		// nothing of the canceled message was written, so the stream stays usable
 		stream.Release();
 		await first;
-		await messageStream.WriteMessageAsync(new ArraySegment<byte>(Message(3, 10)), default);
+		await messageStream.WriteMessageAsync(new ArraySegment<byte>(Message(3, 10)), TestToken);
 
 		Assert.False(messageStream.IsDisposed);
 		Assert.Equal(Message(1, 10).Concat(Message(3, 10)), stream.GetWrittenData());

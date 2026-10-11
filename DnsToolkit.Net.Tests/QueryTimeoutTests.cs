@@ -42,9 +42,11 @@ public class QueryTimeoutTests
 
 		// no cancellation token, only the query timeout of the client
 		var stopwatch = Stopwatch.StartNew();
+#pragma warning disable xUnit1051 // the test checks the query timeout without a token of the caller
 		var resolve = client.ResolveAsync(_name);
+#pragma warning restore xUnit1051
 
-		Assert.True(await Task.WhenAny(resolve, Task.Delay(TimeSpan.FromSeconds(10))) == resolve, "The query did not complete, although it timed out");
+		Assert.True(await Task.WhenAny(resolve, Task.Delay(TimeSpan.FromSeconds(10), TestToken)) == resolve, "The query did not complete, although it timed out");
 		Assert.Null(await resolve);
 		Assert.InRange(stopwatch.Elapsed, TimeSpan.FromMilliseconds(_QUERY_TIMEOUT - 100), TimeSpan.FromSeconds(5));
 		Assert.True(transport.Connection!.IsReceiveCanceled, "The receive was not canceled");
@@ -55,9 +57,11 @@ public class QueryTimeoutTests
 	{
 		// like the timeouts of sockets and of the client, before the connects of TCP and UDP timed out immediately
 		var completion = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+#pragma warning disable xUnit1051 // without a token, the polyfill of net48 takes its own path for an infinite timeout
 		var waiting = completion.Task.WithTimeout(0);
+#pragma warning restore xUnit1051
 
-		await Task.Delay(100);
+		await Task.Delay(100, TestToken);
 		Assert.False(waiting.IsCompleted, "The wait timed out immediately");
 
 		completion.SetResult(1);
@@ -80,7 +84,7 @@ public class QueryTimeoutTests
 		var transport = new ScriptedTransport(_ => Array.Empty<(TimeSpan, DnsMessage)>());
 		using var client = new DnsClient(new[] { IPAddress.Loopback }, new IClientTransport[] { transport }, true, _QUERY_TIMEOUT);
 
-		Assert.Null(await client.ResolveAsync(_name));
+		Assert.Null(await client.ResolveAsync(_name, token: TestToken));
 
 		Assert.True(transport.Connection!.IsReceiveCanceled, "The receive was not canceled");
 		Assert.False(transport.Connection.IsFaulty, "The connection was marked faulty because of the timeout of one query");
@@ -119,7 +123,7 @@ public class QueryTimeoutTests
 		using var client = new DnsClient(new[] { IPAddress.Loopback }, new IClientTransport[] { transport }, true, queryTimeout);
 
 		var stopwatch = Stopwatch.StartNew();
-		var response = await client.SendMessageAsync(ZoneTransferQuery());
+		var response = await client.SendMessageAsync(ZoneTransferQuery(), TestToken);
 
 		Assert.NotNull(response);
 		Assert.True(stopwatch.Elapsed > TimeSpan.FromMilliseconds(queryTimeout), "The zone transfer was faster than the timeout, so the test does not check the restart");
@@ -133,9 +137,9 @@ public class QueryTimeoutTests
 		var transport = new ScriptedTransport(query => new[] { (TimeSpan.Zero, ZoneTransferMessage(query, Soa(), A("a"))) });
 		using var client = new DnsClient(new[] { IPAddress.Loopback }, new IClientTransport[] { transport }, true, _QUERY_TIMEOUT);
 
-		var send = client.SendMessageAsync(ZoneTransferQuery());
+		var send = client.SendMessageAsync(ZoneTransferQuery(), TestToken);
 
-		Assert.True(await Task.WhenAny(send, Task.Delay(TimeSpan.FromSeconds(10))) == send, "The zone transfer did not complete, although its next message timed out");
+		Assert.True(await Task.WhenAny(send, Task.Delay(TimeSpan.FromSeconds(10), TestToken)) == send, "The zone transfer did not complete, although its next message timed out");
 		Assert.Null(await send);
 	}
 
@@ -148,7 +152,7 @@ public class QueryTimeoutTests
 		var transport = new GatedWriteTransport(server.Port);
 		using var client = new DnsClient(new[] { IPAddress.Loopback }, new IClientTransport[] { transport }, true, 10000);
 
-		var first = client.ResolveAsync(_name);
+		var first = client.ResolveAsync(_name, token: TestToken);
 		await transport.FirstWriteStarted;
 
 		using (var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200)))
@@ -167,7 +171,7 @@ public class QueryTimeoutTests
 		Assert.NotNull(await first);
 
 		// before, the canceled query marked the shared connection faulty, so the next query opened a new one
-		Assert.NotNull(await client.ResolveAsync(_name));
+		Assert.NotNull(await client.ResolveAsync(_name, token: TestToken));
 		Assert.Equal(2, transport.Streams[0].WriteCount);
 	}
 
@@ -184,10 +188,10 @@ public class QueryTimeoutTests
 			using var client = new DnsClient(new[] { IPAddress.Loopback }, new IClientTransport[] { transport }, true, _QUERY_TIMEOUT);
 
 			var stopwatch = Stopwatch.StartNew();
-			var resolve = client.ResolveAsync(_name);
-			using var accepted = await listener.AcceptTcpClientAsync();
+			var resolve = client.ResolveAsync(_name, token: TestToken);
+			using var accepted = await listener.AcceptTcpClientAsync(TestToken);
 
-			Assert.True(await Task.WhenAny(resolve, Task.Delay(TimeSpan.FromSeconds(10))) == resolve, "The query did not complete, although the stream setup timed out");
+			Assert.True(await Task.WhenAny(resolve, Task.Delay(TimeSpan.FromSeconds(10), TestToken)) == resolve, "The query did not complete, although the stream setup timed out");
 			Assert.Null(await resolve);
 			Assert.InRange(stopwatch.Elapsed, TimeSpan.FromMilliseconds(_QUERY_TIMEOUT - 100), TimeSpan.FromSeconds(5));
 			Assert.True(transport.IsSetupCanceled, "The stream setup was not canceled");

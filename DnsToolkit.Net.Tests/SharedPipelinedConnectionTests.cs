@@ -37,7 +37,7 @@ public class SharedPipelinedConnectionTests
 		var (connection, shared) = Create();
 		using var query = Lease(shared);
 		var sent = Query(0x1111, "zone");
-		Assert.True(await query.SendAsync(sent));
+		Assert.True(await query.SendAsync(sent, TestToken));
 
 		// all messages of the multi message response arrive, before the query asks for the first one
 		connection.Respond(sent, "m1");
@@ -58,8 +58,8 @@ public class SharedPipelinedConnectionTests
 		using var second = Lease(shared);
 		var firstSent = Query(0x1111, "first");
 		var secondSent = Query(0x2222, "second");
-		await first.SendAsync(firstSent);
-		await second.SendAsync(secondSent);
+		await first.SendAsync(firstSent, TestToken);
+		await second.SendAsync(secondSent, TestToken);
 
 		connection.Respond(secondSent, "s1");
 		connection.Respond(firstSent, "f1");
@@ -77,8 +77,8 @@ public class SharedPipelinedConnectionTests
 		using var first = Lease(shared);
 		using var second = Lease(shared);
 		var sent = Query(0x1111, "same");
-		await first.SendAsync(sent);
-		await second.SendAsync(sent);
+		await first.SendAsync(sent, TestToken);
+		await second.SendAsync(sent, TestToken);
 
 		connection.Respond(sent, "r1");
 		connection.Respond(sent, "r2");
@@ -95,8 +95,8 @@ public class SharedPipelinedConnectionTests
 		using var other = Lease(shared);
 		var finishedSent = Query(0x1111, "finished");
 		var otherSent = Query(0x2222, "other");
-		await finished.SendAsync(finishedSent);
-		await other.SendAsync(otherSent);
+		await finished.SendAsync(finishedSent, TestToken);
+		await other.SendAsync(otherSent, TestToken);
 
 		finished.Dispose();
 
@@ -104,7 +104,7 @@ public class SharedPipelinedConnectionTests
 			connection.Respond(finishedSent, "late" + i);
 		connection.Respond(otherSent, "o1");
 
-		var received = other.ReceiveAsync(otherSent.MessageIdentification);
+		var received = other.ReceiveAsync(otherSent.MessageIdentification, TestToken);
 		await CompletesWithinAsync(received, TimeSpan.FromSeconds(2));
 		Assert.Equal("o1", Marker(await received));
 	}
@@ -117,15 +117,15 @@ public class SharedPipelinedConnectionTests
 		using var other = Lease(shared);
 		var zoneTransferSent = Query(0x1111, "zone");
 		var otherSent = Query(0x2222, "other");
-		await zoneTransfer.SendAsync(zoneTransferSent);
-		await other.SendAsync(otherSent);
+		await zoneTransfer.SendAsync(zoneTransferSent, TestToken);
+		await other.SendAsync(otherSent, TestToken);
 
 		// before, the receive loop waited for the zone transfer to read, once it had 16 unread messages
 		for (var i = 0; i < 50; i++)
 			connection.Respond(zoneTransferSent, "m" + i);
 		connection.Respond(otherSent, "o1");
 
-		var received = other.ReceiveAsync(otherSent.MessageIdentification);
+		var received = other.ReceiveAsync(otherSent.MessageIdentification, TestToken);
 		await CompletesWithinAsync(received, TimeSpan.FromSeconds(2));
 		Assert.Equal("o1", Marker(await received));
 
@@ -144,7 +144,7 @@ public class SharedPipelinedConnectionTests
 			Assert.True(shared.IsAlive, "The connection was closed before the limit of unanswered queries");
 
 			using var query = Lease(shared);
-			await query.SendAsync(Query((ushort) i, "unanswered"));
+			await query.SendAsync(Query((ushort) i, "unanswered"), TestToken);
 		}
 
 		Assert.False(shared.IsAlive, "The connection, whose server stopped answering, is still used");
@@ -160,11 +160,11 @@ public class SharedPipelinedConnectionTests
 		for (var i = 0; i < SharedPipelinedConnection.MaxUnansweredQueries * 2; i++)
 		{
 			using (var unanswered = Lease(shared))
-				await unanswered.SendAsync(Query((ushort) (2 * i), "unanswered"));
+				await unanswered.SendAsync(Query((ushort) (2 * i), "unanswered"), TestToken);
 
 			using var answered = Lease(shared);
 			var sent = Query((ushort) (2 * i + 1), "answered");
-			await answered.SendAsync(sent);
+			await answered.SendAsync(sent, TestToken);
 			connection.Respond(sent, "a");
 			await ReceiveWithinAsync(answered, sent.MessageIdentification);
 		}
@@ -178,7 +178,7 @@ public class SharedPipelinedConnectionTests
 		var (connection, shared) = Create();
 		using var query = Lease(shared);
 		var sent = Query(0x1111, "zone");
-		await query.SendAsync(sent);
+		await query.SendAsync(sent, TestToken);
 
 		var count = 50;
 		for (var i = 0; i < count; i++)
@@ -186,7 +186,7 @@ public class SharedPipelinedConnectionTests
 
 		for (var i = 0; i < count; i++)
 		{
-			var received = query.ReceiveAsync(sent.MessageIdentification);
+			var received = query.ReceiveAsync(sent.MessageIdentification, TestToken);
 			await CompletesWithinAsync(received, TimeSpan.FromSeconds(2));
 			Assert.Equal("m" + i, Marker(await received));
 		}
@@ -198,7 +198,7 @@ public class SharedPipelinedConnectionTests
 		var (connection, shared) = Create();
 		using var query = Lease(shared);
 		var sent = Query(0x1111, "query");
-		await query.SendAsync(sent);
+		await query.SendAsync(sent, TestToken);
 
 		using (var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(50)))
 			await Assert.ThrowsAnyAsync<OperationCanceledException>(() => query.ReceiveAsync(sent.MessageIdentification, cts.Token));
@@ -263,7 +263,7 @@ public class SharedPipelinedConnectionTests
 		Assert.Null(shared.ReceiveLoop);
 		Assert.Equal(0, connection.ReceiveCalls);
 
-		await query.SendAsync(Query(0x1111, "query"));
+		await query.SendAsync(Query(0x1111, "query"), TestToken);
 
 		Assert.NotNull(shared.ReceiveLoop);
 	}
@@ -275,9 +275,9 @@ public class SharedPipelinedConnectionTests
 		var (connection, shared) = Create(onUnusable: _ => Interlocked.Increment(ref closedCalls));
 		using var query = Lease(shared);
 		var sent = Query(0x1111, "query");
-		await query.SendAsync(sent);
+		await query.SendAsync(sent, TestToken);
 
-		var receiving = query.ReceiveAsync(sent.MessageIdentification);
+		var receiving = query.ReceiveAsync(sent.MessageIdentification, TestToken);
 		connection.CloseByServer();
 
 		await CompletesWithinAsync(receiving, TimeSpan.FromSeconds(2));
@@ -299,8 +299,8 @@ public class SharedPipelinedConnectionTests
 		using var other = Lease(shared);
 		var sent = Query(0x1111, "zone");
 		var otherSent = Query(0x2222, "other");
-		await query.SendAsync(sent);
-		await other.SendAsync(otherSent);
+		await query.SendAsync(sent, TestToken);
+		await other.SendAsync(otherSent, TestToken);
 		connection.Respond(sent, "m1");
 		connection.Respond(otherSent, "o1");
 
@@ -322,8 +322,8 @@ public class SharedPipelinedConnectionTests
 		var second = Lease(shared);
 		var firstSent = Query(0x1111, "first");
 		var secondSent = Query(0x2222, "second");
-		await first.SendAsync(firstSent);
-		await second.SendAsync(secondSent);
+		await first.SendAsync(firstSent, TestToken);
+		await second.SendAsync(secondSent, TestToken);
 
 		connection.Respond(firstSent, "f1");
 		Assert.Equal("f1", Marker(await ReceiveWithinAsync(first, firstSent.MessageIdentification)));
@@ -336,7 +336,7 @@ public class SharedPipelinedConnectionTests
 		Assert.Equal(1, unusableCalls);
 
 		// the response to the outstanding query is still received
-		await Task.Delay(200);
+		await Task.Delay(200, TestToken);
 		Assert.False(connection.IsDisposed);
 		connection.Respond(secondSent, "s1");
 		Assert.Equal("s1", Marker(await ReceiveWithinAsync(second, secondSent.MessageIdentification)));
@@ -353,7 +353,7 @@ public class SharedPipelinedConnectionTests
 		var (connection, shared) = Create(idleTimeout: TimeSpan.FromMilliseconds(50));
 		var query = Lease(shared);
 		var sent = Query(0x1111, "query");
-		await query.SendAsync(sent);
+		await query.SendAsync(sent, TestToken);
 		connection.Respond(sent, "r1");
 		Assert.Equal("r1", Marker(await ReceiveWithinAsync(query, sent.MessageIdentification)));
 
@@ -367,7 +367,7 @@ public class SharedPipelinedConnectionTests
 		Assert.Equal(TimeSpan.FromMilliseconds(1350), shared.IdleTimeout);
 
 		// A timer does not fire early, so the own idle timeout of 50 ms no longer applies
-		await Task.Delay(400);
+		await Task.Delay(400, TestToken);
 		Assert.True(shared.IsAlive, "The connection was closed before the keepalive of the server");
 
 		Assert.True(await WaitUntilClosedAsync(connection, TimeSpan.FromSeconds(10)), "The connection was not closed after the keepalive of the server");
@@ -382,14 +382,14 @@ public class SharedPipelinedConnectionTests
 		using var second = Lease(shared);
 		var firstSent = Query(0x1111, "first");
 		var secondSent = Query(0x2222, "second");
-		await first.SendAsync(firstSent);
-		await second.SendAsync(secondSent);
+		await first.SendAsync(firstSent, TestToken);
+		await second.SendAsync(secondSent, TestToken);
 
 		connection.Respond(firstSent, "f1");
 		Assert.Equal("f1", Marker(await ReceiveWithinAsync(first, firstSent.MessageIdentification)));
 		first.RestartIdleTimeout(TimeSpan.FromMilliseconds(100));
 
-		await Task.Delay(300);
+		await Task.Delay(300, TestToken);
 		Assert.True(shared.IsAlive, "The connection was closed, although queries are in progress");
 
 		connection.Respond(secondSent, "s1");
@@ -414,9 +414,9 @@ public class SharedPipelinedConnectionTests
 		var (connection, shared) = Create(initialIdleTimeout: TimeSpan.FromMilliseconds(200));
 		using var query = Lease(shared);
 		var sent = Query(0x1111, "query");
-		await query.SendAsync(sent);
+		await query.SendAsync(sent, TestToken);
 
-		await Task.Delay(500);
+		await Task.Delay(500, TestToken);
 		Assert.True(shared.IsAlive);
 
 		connection.Respond(sent, "r1");
@@ -429,12 +429,12 @@ public class SharedPipelinedConnectionTests
 		var (connection, shared) = Create(idleTimeout: TimeSpan.FromMilliseconds(100));
 		var query = Lease(shared);
 		var sent = Query(0x1111, "query");
-		await query.SendAsync(sent);
+		await query.SendAsync(sent, TestToken);
 		connection.Respond(sent, "r1");
 		Assert.Equal("r1", Marker(await ReceiveWithinAsync(query, sent.MessageIdentification)));
 
 		// the query is still in progress, e.g. as it validates the response
-		await Task.Delay(300);
+		await Task.Delay(300, TestToken);
 		Assert.True(shared.IsAlive);
 
 		query.Dispose();
@@ -488,12 +488,6 @@ public class SharedPipelinedConnectionTests
 		var receiving = query.ReceiveAsync(identification);
 		await CompletesWithinAsync(receiving, TimeSpan.FromSeconds(2));
 		return await receiving;
-	}
-
-	private static async Task CompletesWithinAsync(Task task, TimeSpan timeout)
-	{
-		Assert.True(await Task.WhenAny(task, Task.Delay(timeout)) == task, $"The task did not complete within {timeout}");
-		await task;
 	}
 
 	/// <summary>

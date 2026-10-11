@@ -38,8 +38,8 @@ public class ConnectionPoolTests
 			return pending.Task;
 		};
 
-		var first = pool.GetOrConnectAsync(_server, connect, default);
-		var second = pool.GetOrConnectAsync(_server, connect, default);
+		var first = pool.GetOrConnectAsync(_server, connect, TestToken);
+		var second = pool.GetOrConnectAsync(_server, connect, TestToken);
 		var connection = new FakeConnection();
 		pending.SetResult(connection);
 
@@ -54,13 +54,13 @@ public class ConnectionPoolTests
 		// e.g. closed by its idle timeout or draining after a keepalive of 0
 		var pool = new ConnectionPool<FakeConnection>();
 		var closed = new FakeConnection();
-		Assert.Same(closed, await pool.GetOrConnectAsync(_server, () => Task.FromResult<FakeConnection?>(closed), default));
+		Assert.Same(closed, await pool.GetOrConnectAsync(_server, () => Task.FromResult<FakeConnection?>(closed), TestToken));
 		closed.IsAlive = false;
 
 		// before, the closed connection was returned, so the query failed instead of connecting again
 		var fresh = new FakeConnection();
-		Assert.Same(fresh, await pool.GetOrConnectAsync(_server, () => Task.FromResult<FakeConnection?>(fresh), default));
-		Assert.Same(fresh, await pool.GetPooledAsync(_server, default));
+		Assert.Same(fresh, await pool.GetOrConnectAsync(_server, () => Task.FromResult<FakeConnection?>(fresh), TestToken));
+		Assert.Same(fresh, await pool.GetPooledAsync(_server, TestToken));
 	}
 
 	[Fact]
@@ -74,7 +74,7 @@ public class ConnectionPoolTests
 		{
 			Interlocked.Increment(ref connectCalls);
 			return Task.FromResult<FakeConnection?>(new FakeConnection { IsAlive = false });
-		}, default);
+		}, TestToken);
 
 		Assert.Null(connection);
 		Assert.Equal(1, connectCalls);
@@ -86,12 +86,12 @@ public class ConnectionPoolTests
 	{
 		var pool = new ConnectionPool<FakeConnection>();
 		var pending = NewConnect();
-		var connecting = pool.GetOrConnectAsync(_server, () => pending.Task, default);
+		var connecting = pool.GetOrConnectAsync(_server, () => pending.Task, TestToken);
 
 		try
 		{
 			// reading the result of the pending connect inside the lock would block until it is established
-			var remove = Task.Run(() => pool.Remove(_server, new FakeConnection()));
+			var remove = Task.Run(() => pool.Remove(_server, new FakeConnection()), TestToken);
 
 			await CompletesWithinAsync(remove, TimeSpan.FromSeconds(2));
 			Assert.Equal(1, pool.Count);
@@ -108,14 +108,14 @@ public class ConnectionPoolTests
 	{
 		var pool = new ConnectionPool<FakeConnection>();
 		var pending = NewConnect();
-		var connecting = pool.GetOrConnectAsync(_server, () => pending.Task, default);
+		var connecting = pool.GetOrConnectAsync(_server, () => pending.Task, TestToken);
 		var connection = new FakeConnection();
 
 		try
 		{
 			// on another thread, so the test fails instead of hanging, if it blocks
 			var pooled = Task.Run(() => pool.GetPooledAsync(_server, default));
-			await Task.Delay(100);
+			await Task.Delay(100, TestToken);
 
 			// the pool can be used for other servers meanwhile
 			var other = new FakeConnection();
@@ -138,7 +138,7 @@ public class ConnectionPoolTests
 	{
 		var pool = new ConnectionPool<FakeConnection>();
 
-		Assert.Null(await pool.GetPooledAsync(_server, default));
+		Assert.Null(await pool.GetPooledAsync(_server, TestToken));
 	}
 
 	[Fact]
@@ -146,12 +146,12 @@ public class ConnectionPoolTests
 	{
 		var pool = new ConnectionPool<FakeConnection>();
 		var connection = new FakeConnection();
-		await pool.GetOrConnectAsync(_server, () => Task.FromResult<FakeConnection?>(connection), default);
+		await pool.GetOrConnectAsync(_server, () => Task.FromResult<FakeConnection?>(connection), TestToken);
 
 		// e.g. the server asked to close it, but the responses to the queries in progress are still received
 		connection.IsAlive = false;
 
-		Assert.Null(await pool.GetPooledAsync(_server, default));
+		Assert.Null(await pool.GetPooledAsync(_server, TestToken));
 		Assert.Equal(0, connection.MarkFaultyCalls);
 		Assert.Equal(0, pool.Count);
 	}
@@ -166,14 +166,14 @@ public class ConnectionPoolTests
 		{
 			Interlocked.Increment(ref connectCalls);
 			return Task.FromResult<FakeConnection?>(null);
-		}, default));
+		}, TestToken));
 		Assert.Equal(0, pool.Count);
 
 		await Assert.ThrowsAsync<IOException>(() => pool.GetOrConnectAsync(_server, () =>
 		{
 			Interlocked.Increment(ref connectCalls);
 			return Task.FromException<FakeConnection?>(new IOException());
-		}, default));
+		}, TestToken));
 		Assert.Equal(0, pool.Count);
 
 		var connection = new FakeConnection();
@@ -181,7 +181,7 @@ public class ConnectionPoolTests
 		{
 			Interlocked.Increment(ref connectCalls);
 			return Task.FromResult<FakeConnection?>(connection);
-		}, default));
+		}, TestToken));
 		Assert.Equal(3, connectCalls);
 	}
 
@@ -190,16 +190,16 @@ public class ConnectionPoolTests
 	{
 		var pool = new ConnectionPool<FakeConnection>();
 		var old = new FakeConnection();
-		await pool.GetOrConnectAsync(_server, () => Task.FromResult<FakeConnection?>(old), default);
+		await pool.GetOrConnectAsync(_server, () => Task.FromResult<FakeConnection?>(old), TestToken);
 		pool.Remove(_server, old);
 
 		var current = new FakeConnection();
-		await pool.GetOrConnectAsync(_server, () => Task.FromResult<FakeConnection?>(current), default);
+		await pool.GetOrConnectAsync(_server, () => Task.FromResult<FakeConnection?>(current), TestToken);
 
 		// e.g. the old connection reports late, that it was closed
 		pool.Remove(_server, old);
 
-		Assert.Same(current, await pool.GetPooledAsync(_server, default));
+		Assert.Same(current, await pool.GetPooledAsync(_server, TestToken));
 	}
 
 	[Fact]
@@ -216,7 +216,7 @@ public class ConnectionPoolTests
 
 		using var cts = new CancellationTokenSource();
 		var canceled = pool.GetOrConnectAsync(_server, connect, cts.Token);
-		var waiting = pool.GetOrConnectAsync(_server, connect, default);
+		var waiting = pool.GetOrConnectAsync(_server, connect, TestToken);
 		cts.Cancel();
 
 		await Assert.ThrowsAnyAsync<OperationCanceledException>(() => canceled);
@@ -225,7 +225,7 @@ public class ConnectionPoolTests
 		pending.SetResult(connection);
 
 		Assert.Same(connection, await waiting);
-		Assert.Same(connection, await pool.GetPooledAsync(_server, default));
+		Assert.Same(connection, await pool.GetPooledAsync(_server, TestToken));
 		Assert.Equal(1, connectCalls);
 	}
 
@@ -234,9 +234,9 @@ public class ConnectionPoolTests
 	{
 		var pool = new ConnectionPool<FakeConnection>();
 		var established = new FakeConnection();
-		await pool.GetOrConnectAsync(_server, () => Task.FromResult<FakeConnection?>(established), default);
+		await pool.GetOrConnectAsync(_server, () => Task.FromResult<FakeConnection?>(established), TestToken);
 		var pending = NewConnect();
-		var connecting = pool.GetOrConnectAsync(_otherServer, () => pending.Task, default);
+		var connecting = pool.GetOrConnectAsync(_otherServer, () => pending.Task, TestToken);
 
 		pool.Clear();
 
@@ -250,12 +250,6 @@ public class ConnectionPoolTests
 	}
 
 	private static TaskCompletionSource<FakeConnection?> NewConnect() => new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-	private static async Task CompletesWithinAsync(Task task, TimeSpan timeout)
-	{
-		Assert.True(await Task.WhenAny(task, Task.Delay(timeout)) == task, $"The task did not complete within {timeout}");
-		await task;
-	}
 
 	private sealed class FakeConnection : IPooledConnection
 	{

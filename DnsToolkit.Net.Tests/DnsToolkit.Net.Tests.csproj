@@ -34,5 +34,6 @@
 
   <ItemGroup>
     <Using Include="Xunit" />
+    <Using Include="DnsToolkit.Net.Tests.TestHelpers" Static="true" />
   </ItemGroup>
 </Project>

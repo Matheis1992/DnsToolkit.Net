@@ -36,7 +36,7 @@ public class TcpTransportTests
 	{
 		using var server = CreateServer(tcpTimeout: 5000, tcpKeepAlive: 1000);
 		using var client = new TcpClient();
-		await client.ConnectAsync(IPAddress.Loopback, server.Port);
+		await client.ConnectAsync(IPAddress.Loopback, server.Port, TestToken);
 
 		var stopwatch = Stopwatch.StartNew();
 		Assert.True(await TransportTests.WaitForRemoteCloseAsync(client, TimeSpan.FromSeconds(10)), "The idle connection was not closed");
@@ -54,18 +54,18 @@ public class TcpTransportTests
 
 		// queries for large responses, which the client never reads, so the buffers of both sides fill up and the writes of the server block
 		using var first = new TcpClient();
-		await first.ConnectAsync(IPAddress.Loopback, server.Port);
+		await first.ConnectAsync(IPAddress.Loopback, server.Port, TestToken);
 		var queries = Enumerable.Range(0, 500).SelectMany(i => Query((ushort) i, big, RecordType.Txt)).ToArray();
-		await first.GetStream().WriteAsync(queries, 0, queries.Length);
+		await first.GetStream().WriteAsync(queries, 0, queries.Length, TestToken);
 
 		using var second = new TcpClient();
-		await second.ConnectAsync(IPAddress.Loopback, server.Port);
+		await second.ConnectAsync(IPAddress.Loopback, server.Port, TestToken);
 		var query = Query(0x4242);
-		await second.GetStream().WriteAsync(query, 0, query.Length);
+		await second.GetStream().WriteAsync(query, 0, query.Length, TestToken);
 
 		// before, the blocked writes kept the first connection and its slot forever
 		var response = ReadResponseAsync(second.GetStream());
-		Assert.True(await Task.WhenAny(response, Task.Delay(TimeSpan.FromSeconds(10))) == response, "The second client was not served, so the first connection was not closed");
+		Assert.True(await Task.WhenAny(response, Task.Delay(TimeSpan.FromSeconds(10), TestToken)) == response, "The second client was not served, so the first connection was not closed");
 		Assert.Equal(0x4242, (await response).TransactionID);
 	}
 
@@ -86,7 +86,7 @@ public class TcpTransportTests
 			transport.Bind();
 
 			using var client = new TcpClient(AddressFamily.InterNetwork);
-			await client.ConnectAsync(IPAddress.Loopback, port);
+			await client.ConnectAsync(IPAddress.Loopback, port, TestToken);
 			Assert.True(client.Connected);
 		}
 		finally
@@ -101,11 +101,11 @@ public class TcpTransportTests
 		// the keep alive ends, while the query is processed, but the response is still sent before the connection is closed
 		using var server = new LocalDnsServer(new DnsRecordBase[] { new ARecord(_name, 60, _address) }, tcpKeepAlive: 500, answerDelay: TimeSpan.FromMilliseconds(1500));
 		using var client = new TcpClient();
-		await client.ConnectAsync(IPAddress.Loopback, server.Port);
+		await client.ConnectAsync(IPAddress.Loopback, server.Port, TestToken);
 		var stream = client.GetStream();
 
 		var query = Query(0x1111);
-		await stream.WriteAsync(query, 0, query.Length);
+		await stream.WriteAsync(query, 0, query.Length, TestToken);
 
 		Assert.Equal(0x1111, (await ReadResponseAsync(stream)).TransactionID);
 		Assert.True(await TransportTests.WaitForRemoteCloseAsync(client, TimeSpan.FromSeconds(10)), "The idle connection was not closed after the response");
@@ -117,16 +117,16 @@ public class TcpTransportTests
 		// the keep alive only runs while no query is in progress (RFC 7766, section 6.2.3)
 		using var server = new LocalDnsServer(new DnsRecordBase[] { new ARecord(_name, 60, _address) }, tcpKeepAlive: 500, answerDelay: TimeSpan.FromMilliseconds(1500));
 		using var client = new TcpClient();
-		await client.ConnectAsync(IPAddress.Loopback, server.Port);
+		await client.ConnectAsync(IPAddress.Loopback, server.Port, TestToken);
 		var stream = client.GetStream();
 
 		var first = Query(0x1111);
-		await stream.WriteAsync(first, 0, first.Length);
+		await stream.WriteAsync(first, 0, first.Length, TestToken);
 
 		// longer than the keep alive, but shorter than the processing of the first query. Before, the server stopped reading here.
-		await Task.Delay(1000);
+		await Task.Delay(1000, TestToken);
 		var second = Query(0x2222);
-		await stream.WriteAsync(second, 0, second.Length);
+		await stream.WriteAsync(second, 0, second.Length, TestToken);
 
 		var ids = new[] { (await ReadResponseAsync(stream)).TransactionID, (await ReadResponseAsync(stream)).TransactionID };
 		Assert.Equal(new ushort[] { 0x1111, 0x2222 }, ids.OrderBy(x => x));
@@ -140,10 +140,10 @@ public class TcpTransportTests
 		// the keep alive is long, so only the timeout for the rest of a started query can close the connection
 		using var server = CreateServer(tcpTimeout: 1000, tcpKeepAlive: 60000);
 		using var client = new TcpClient();
-		await client.ConnectAsync(IPAddress.Loopback, server.Port);
+		await client.ConnectAsync(IPAddress.Loopback, server.Port, TestToken);
 
 		// announces 30 bytes, but sends only 5
-		await client.GetStream().WriteAsync(new byte[] { 0, 30, 1, 2, 3, 4, 5 }, 0, 7);
+		await client.GetStream().WriteAsync(new byte[] { 0, 30, 1, 2, 3, 4, 5 }, 0, 7, TestToken);
 
 		var stopwatch = Stopwatch.StartNew();
 		Assert.True(await TransportTests.WaitForRemoteCloseAsync(client, TimeSpan.FromSeconds(10)), "The connection with the incomplete query was not closed");
@@ -155,13 +155,13 @@ public class TcpTransportTests
 	{
 		using var server = CreateServer();
 		using var client = new TcpClient();
-		await client.ConnectAsync(IPAddress.Loopback, server.Port);
+		await client.ConnectAsync(IPAddress.Loopback, server.Port, TestToken);
 		var stream = client.GetStream();
 
 		foreach (var b in Query(0x1111))
 		{
-			await stream.WriteAsync(new[] { b }, 0, 1);
-			await Task.Delay(10);
+			await stream.WriteAsync(new[] { b }, 0, 1, TestToken);
+			await Task.Delay(10, TestToken);
 		}
 
 		var response = await ReadResponseAsync(stream);
@@ -174,11 +174,11 @@ public class TcpTransportTests
 	{
 		using var server = CreateServer();
 		using var client = new TcpClient();
-		await client.ConnectAsync(IPAddress.Loopback, server.Port);
+		await client.ConnectAsync(IPAddress.Loopback, server.Port, TestToken);
 		var stream = client.GetStream();
 
 		var queries = Query(0x1111).Concat(Query(0x2222)).Concat(Query(0x3333)).ToArray();
-		await stream.WriteAsync(queries, 0, queries.Length);
+		await stream.WriteAsync(queries, 0, queries.Length, TestToken);
 
 		// the responses may arrive in any order
 		var ids = new List<ushort>();
@@ -225,22 +225,22 @@ public class TcpTransportTests
 
 		// the first client takes the only connection slot and stays idle
 		using var first = new TcpClient();
-		await first.ConnectAsync(IPAddress.Loopback, server.Port);
-		await Task.Delay(300);
+		await first.ConnectAsync(IPAddress.Loopback, server.Port, TestToken);
+		await Task.Delay(300, TestToken);
 
 		// the second client is in the backlog of the operating system, its query is not answered yet
 		using var second = new TcpClient();
-		await second.ConnectAsync(IPAddress.Loopback, server.Port);
+		await second.ConnectAsync(IPAddress.Loopback, server.Port, TestToken);
 		var query = Query(0x4242);
-		await second.GetStream().WriteAsync(query, 0, query.Length);
+		await second.GetStream().WriteAsync(query, 0, query.Length, TestToken);
 
 		var response = ReadResponseAsync(second.GetStream());
-		Assert.False(await Task.WhenAny(response, Task.Delay(700)) == response, "The second connection was served, although the limit is one");
+		Assert.False(await Task.WhenAny(response, Task.Delay(700, TestToken)) == response, "The second connection was served, although the limit is one");
 
 		// closing the first connection frees the slot
 		first.Close();
 
-		Assert.True(await Task.WhenAny(response, Task.Delay(5000)) == response, "The second connection was not served after the first one was closed");
+		Assert.True(await Task.WhenAny(response, Task.Delay(5000, TestToken)) == response, "The second connection was not served after the first one was closed");
 		Assert.Equal(0x4242, (await response).TransactionID);
 	}
 
