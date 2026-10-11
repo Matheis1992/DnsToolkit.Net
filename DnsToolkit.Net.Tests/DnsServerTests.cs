@@ -65,7 +65,7 @@ public class DnsServerTests
 
 		var server = new DnsServer(transport);
 		server.Start();
-		await Task.Delay(TimeSpan.FromMilliseconds(500));
+		await Task.Delay(TimeSpan.FromMilliseconds(500), TestToken);
 		((IDisposable) server).Dispose();
 
 		// a busy loop calls AcceptConnectionAsync millions of times per second
@@ -109,7 +109,7 @@ public class DnsServerTests
 
 		var server = new DnsServer(transport);
 		server.Start();
-		await Task.Delay(TimeSpan.FromSeconds(1));
+		await Task.Delay(TimeSpan.FromSeconds(1), TestToken);
 		((IDisposable) server).Dispose();
 
 		// about 8 retries with growing delays up to 100 ms and then about 9 retries per remaining second
@@ -131,9 +131,9 @@ public class DnsServerTests
 		};
 
 		server.Start();
-		await Task.Delay(200);
+		await Task.Delay(200, TestToken);
 		server.Stop();
-		await Task.Delay(200);
+		await Task.Delay(200, TestToken);
 
 		lock (exceptions)
 			Assert.Empty(exceptions);
@@ -165,7 +165,7 @@ public class DnsServerTests
 		};
 		server.Start();
 
-		Assert.True(await Task.WhenAny(exceptionReported.Task, Task.Delay(5000)) == exceptionReported.Task, "The exception of the transport was not reported");
+		Assert.True(await Task.WhenAny(exceptionReported.Task, Task.Delay(5000, TestToken)) == exceptionReported.Task, "The exception of the transport was not reported");
 		Assert.True(await connection.WaitForDisposeAsync(TimeSpan.FromSeconds(5)), "The server stopped accepting connections after the exception");
 	}
 
@@ -210,11 +210,11 @@ public class DnsServerTests
 
 		try
 		{
-			Assert.True(await Task.WhenAny(limitReached.Task, Task.Delay(TimeSpan.FromSeconds(10))) == limitReached.Task, "Three queries were not started");
+			Assert.True(await Task.WhenAny(limitReached.Task, Task.Delay(TimeSpan.FromSeconds(10), TestToken)) == limitReached.Task, "Three queries were not started");
 
 			// A further query would start right after the third one, so a short time shows that none does. On a slow machine
 			// this can only miss an error, but not fail without one. Before, all queries were processed at the same time.
-			await Task.Delay(200);
+			await Task.Delay(200, TestToken);
 			Assert.Equal(3, Volatile.Read(ref started));
 
 			released.TrySetResult(true);
@@ -266,7 +266,7 @@ public class DnsServerTests
 		{
 			if (condition())
 				return true;
-			await Task.Delay(20);
+			await Task.Delay(20, TestToken);
 		}
 
 		return condition();
@@ -314,14 +314,14 @@ public class DnsServerTests
 			Assert.True(await handler.WaitForQueryAsync(TimeSpan.FromSeconds(5)), "The query was not received");
 
 			var stopping = stop(server);
-			Assert.False(await Task.WhenAny(stopping, Task.Delay(300)) == stopping, "The server stopped while a query was processed");
+			Assert.False(await Task.WhenAny(stopping, Task.Delay(300, TestToken)) == stopping, "The server stopped while a query was processed");
 
 			// the response to the query in progress has to be sent over the transport
 			Assert.Equal(0, transport.CloseCalls);
 
 			handler.Release();
 
-			Assert.True(await Task.WhenAny(stopping, Task.Delay(TimeSpan.FromSeconds(5))) == stopping, "The server did not stop after the query was processed");
+			Assert.True(await Task.WhenAny(stopping, Task.Delay(TimeSpan.FromSeconds(5), TestToken)) == stopping, "The server did not stop after the query was processed");
 			await stopping;
 			Assert.Equal(1, connection.SentPackages);
 			Assert.True(await connection.WaitForDisposeAsync(TimeSpan.Zero), "The connection was not disposed when the server stopped");
@@ -351,7 +351,7 @@ public class DnsServerTests
 			using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
 			var stopping = server.StopAsync(cts.Token);
 
-			Assert.True(await Task.WhenAny(stopping, Task.Delay(TimeSpan.FromSeconds(5))) == stopping, "Stopping did not end when the token was canceled");
+			Assert.True(await Task.WhenAny(stopping, Task.Delay(TimeSpan.FromSeconds(5), TestToken)) == stopping, "Stopping did not end when the token was canceled");
 			await Assert.ThrowsAnyAsync<OperationCanceledException>(() => stopping);
 
 			// stopping is no longer graceful, so the connection is aborted while its query is still processed
@@ -369,11 +369,11 @@ public class DnsServerTests
 	{
 		var server = new DnsServer(new FakeServerTransport());
 
-		await CompletesWithinAsync(server.StopAsync(), TimeSpan.FromSeconds(5));
+		await CompletesWithinAsync(server.StopAsync(TestToken), TimeSpan.FromSeconds(5));
 
 		server.Start();
-		await CompletesWithinAsync(server.StopAsync(), TimeSpan.FromSeconds(5));
-		await CompletesWithinAsync(server.StopAsync(), TimeSpan.FromSeconds(5));
+		await CompletesWithinAsync(server.StopAsync(TestToken), TimeSpan.FromSeconds(5));
+		await CompletesWithinAsync(server.StopAsync(TestToken), TimeSpan.FromSeconds(5));
 	}
 
 	[Fact]
@@ -384,7 +384,7 @@ public class DnsServerTests
 		var server = new DnsServer(plain, asyncClosable);
 		server.Start();
 
-		await CompletesWithinAsync(server.StopAsync(), TimeSpan.FromSeconds(5));
+		await CompletesWithinAsync(server.StopAsync(TestToken), TimeSpan.FromSeconds(5));
 
 		Assert.Equal(1, plain.CloseCalls);
 		Assert.Equal(1, asyncClosable.CloseAsyncCalls);
@@ -407,14 +407,14 @@ public class DnsServerTests
 		server.Start();
 
 		// before, the exception ended the stop, so the other transport stayed bound and the server could not be started again
-		await CompletesWithinAsync(server.StopAsync(), TimeSpan.FromSeconds(5));
+		await CompletesWithinAsync(server.StopAsync(TestToken), TimeSpan.FromSeconds(5));
 
 		Assert.Equal(1, other.CloseCalls);
 		lock (exceptions)
 			Assert.Contains(exceptions, e => e is InvalidOperationException);
 
 		server.Start();
-		await CompletesWithinAsync(server.StopAsync(), TimeSpan.FromSeconds(5));
+		await CompletesWithinAsync(server.StopAsync(TestToken), TimeSpan.FromSeconds(5));
 		Assert.Equal(2, other.CloseCalls);
 
 		((IDisposable) server).Dispose();
@@ -486,7 +486,7 @@ public class DnsServerTests
 		((IDisposable) server).Dispose();
 
 		var exception = Record.Exception(server.Stop);
-		await CompletesWithinAsync(server.StopAsync(), TimeSpan.FromSeconds(5));
+		await CompletesWithinAsync(server.StopAsync(TestToken), TimeSpan.FromSeconds(5));
 
 		Assert.Null(exception);
 		Assert.Equal(1, transport.CloseCalls);
@@ -509,8 +509,8 @@ public class DnsServerTests
 
 		try
 		{
-			var stops = new[] { server.StopAsync(), Task.Run(server.Stop), server.StopAsync() };
-			Assert.False(await Task.WhenAny(Task.WhenAll(stops), Task.Delay(300)) == Task.WhenAll(stops), "A stop ended while a query was processed");
+			var stops = new[] { server.StopAsync(TestToken), Task.Run(server.Stop, TestToken), server.StopAsync(TestToken) };
+			Assert.False(await Task.WhenAny(Task.WhenAll(stops), Task.Delay(300, TestToken)) == Task.WhenAll(stops), "A stop ended while a query was processed");
 
 			handler.Release();
 
@@ -531,10 +531,10 @@ public class DnsServerTests
 
 		try
 		{
-			var stopping = server.StopAsync();
-			var disposing = Task.Run(() => ((IDisposable) server).Dispose());
+			var stopping = server.StopAsync(TestToken);
+			var disposing = Task.Run(() => ((IDisposable) server).Dispose(), TestToken);
 
-			Assert.False(await Task.WhenAny(disposing, Task.Delay(300)) == disposing, "The server was disposed while it was stopping");
+			Assert.False(await Task.WhenAny(disposing, Task.Delay(300, TestToken)) == disposing, "The server was disposed while it was stopping");
 			Assert.Equal(0, transport.DisposeCalls);
 
 			handler.Release();
@@ -559,7 +559,7 @@ public class DnsServerTests
 
 		try
 		{
-			var graceful = server.StopAsync();
+			var graceful = server.StopAsync(TestToken);
 
 			using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
 			var impatient = server.StopAsync(cts.Token);
@@ -587,7 +587,7 @@ public class DnsServerTests
 		{
 			Assert.Throws<InvalidOperationException>(server.Start);
 
-			var stopping = server.StopAsync();
+			var stopping = server.StopAsync(TestToken);
 			Assert.Throws<InvalidOperationException>(server.Start);
 
 			handler.Release();
@@ -607,9 +607,9 @@ public class DnsServerTests
 		var server = new DnsServer(transport);
 
 		server.Start();
-		await CompletesWithinAsync(server.StopAsync(), TimeSpan.FromSeconds(5));
+		await CompletesWithinAsync(server.StopAsync(TestToken), TimeSpan.FromSeconds(5));
 		server.Start();
-		await CompletesWithinAsync(server.StopAsync(), TimeSpan.FromSeconds(5));
+		await CompletesWithinAsync(server.StopAsync(TestToken), TimeSpan.FromSeconds(5));
 
 		Assert.Equal(2, transport.BindCalls);
 		Assert.Equal(2, transport.CloseCalls);
@@ -717,11 +717,11 @@ public class DnsServerTests
 		var (server, port) = StartServer(endpoint => new TcpServerTransport(endpoint, keepAlive: 120000), AnswerQuery);
 
 		using var client = new TcpClient();
-		await client.ConnectAsync(IPAddress.Loopback, port);
-		await Task.Delay(200);
+		await client.ConnectAsync(IPAddress.Loopback, port, TestToken);
+		await Task.Delay(200, TestToken);
 
 		var stopwatch = System.Diagnostics.Stopwatch.StartNew();
-		await CompletesWithinAsync(server.StopAsync(), TimeSpan.FromSeconds(5));
+		await CompletesWithinAsync(server.StopAsync(TestToken), TimeSpan.FromSeconds(5));
 
 		Assert.InRange(stopwatch.Elapsed, TimeSpan.Zero, TimeSpan.FromSeconds(2));
 		Assert.True(await TransportTests.WaitForRemoteCloseAsync(client, TimeSpan.FromSeconds(5)), "The idle connection was not closed");
@@ -736,14 +736,14 @@ public class DnsServerTests
 		try
 		{
 			using var client = new TcpClient();
-			await client.ConnectAsync(IPAddress.Loopback, port);
+			await client.ConnectAsync(IPAddress.Loopback, port, TestToken);
 			var stream = client.GetStream();
 			var query = EncodeQuery(0x5151, withLengthPrefix: true);
-			await stream.WriteAsync(query, 0, query.Length);
+			await stream.WriteAsync(query, 0, query.Length, TestToken);
 			Assert.True(await handler.WaitForQueryAsync(TimeSpan.FromSeconds(5)), "The query was not received");
 
-			var stopping = server.StopAsync();
-			await Task.Delay(300);
+			var stopping = server.StopAsync(TestToken);
+			await Task.Delay(300, TestToken);
 			handler.Release();
 
 			var response = await TcpTransportTests.ReadResponseAsync(stream);
@@ -773,12 +773,12 @@ public class DnsServerTests
 			await client.SendAsync(query, query.Length);
 			Assert.True(await handler.WaitForQueryAsync(TimeSpan.FromSeconds(5)), "The query was not received");
 
-			var stopping = server.StopAsync();
-			await Task.Delay(300);
+			var stopping = server.StopAsync(TestToken);
+			await Task.Delay(300, TestToken);
 			handler.Release();
 
-			var receive = client.ReceiveAsync();
-			Assert.True(await Task.WhenAny(receive, Task.Delay(TimeSpan.FromSeconds(5))) == receive, "The query in progress was not answered");
+			var receive = client.ReceiveAsync(TestToken).AsTask();
+			Assert.True(await Task.WhenAny(receive, Task.Delay(TimeSpan.FromSeconds(5), TestToken)) == receive, "The query in progress was not answered");
 			Assert.Equal(0x6161, DnsMessage.Parse(new ArraySegment<byte>((await receive).Buffer)).TransactionID);
 
 			await CompletesWithinAsync(stopping, TimeSpan.FromSeconds(5));
@@ -806,7 +806,7 @@ public class DnsServerTests
 		{
 			await AssertUdpAndTcpAreAnsweredAsync(port, 0x7171);
 
-			await CompletesWithinAsync(server.StopAsync(), TimeSpan.FromSeconds(5));
+			await CompletesWithinAsync(server.StopAsync(TestToken), TimeSpan.FromSeconds(5));
 			server.Start();
 
 			await AssertUdpAndTcpAreAnsweredAsync(port, 0x7272);
@@ -826,7 +826,7 @@ public class DnsServerTests
 			await udpClient.SendAsync(query, query.Length);
 
 			var receive = udpClient.ReceiveAsync();
-			Assert.True(await Task.WhenAny(receive, Task.Delay(TimeSpan.FromSeconds(5))) == receive, "The UDP query was not answered");
+			Assert.True(await Task.WhenAny(receive, Task.Delay(TimeSpan.FromSeconds(5), TestToken)) == receive, "The UDP query was not answered");
 			Assert.Equal(transactionId, DnsMessage.Parse(new ArraySegment<byte>((await receive).Buffer)).TransactionID);
 		}
 
@@ -867,12 +867,6 @@ public class DnsServerTests
 		}
 	}
 
-	private static async Task CompletesWithinAsync(Task task, TimeSpan timeout)
-	{
-		Assert.True(await Task.WhenAny(task, Task.Delay(timeout)) == task, $"The task did not complete within {timeout}");
-		await task;
-	}
-
 	/// <summary>
 	///   Answers queries only after it was released
 	/// </summary>
@@ -890,7 +884,7 @@ public class DnsServerTests
 
 		public async Task<bool> WaitForQueryAsync(TimeSpan timeout)
 		{
-			return await Task.WhenAny(_received.Task, Task.Delay(timeout)) == _received.Task;
+			return await Task.WhenAny(_received.Task, Task.Delay(timeout, TestToken)) == _received.Task;
 		}
 
 		public void Release() => _released.TrySetResult(true);
@@ -1115,7 +1109,7 @@ public class DnsServerTests
 
 		public async Task<bool> WaitForDisposeAsync(TimeSpan timeout)
 		{
-			return await Task.WhenAny(_disposed.Task, Task.Delay(timeout)) == _disposed.Task;
+			return await Task.WhenAny(_disposed.Task, Task.Delay(timeout, TestToken)) == _disposed.Task;
 		}
 
 		public void Dispose()

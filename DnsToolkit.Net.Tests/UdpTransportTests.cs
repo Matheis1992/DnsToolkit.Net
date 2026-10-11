@@ -46,8 +46,8 @@ public class UdpTransportTests
 
 		// the response to the closed port results in an ICMP port unreachable,
 		// which on Windows fails the next receive of the server socket, if not disabled
-		await first!.SendAsync(Response(0x1111));
-		await Task.Delay(200);
+		await first!.SendAsync(Response(0x1111), TestToken);
+		await Task.Delay(200, TestToken);
 
 		using var secondClient = new UdpClient(AddressFamily.InterNetwork);
 		var secondQuery = Query(0x2222);
@@ -55,7 +55,7 @@ public class UdpTransportTests
 
 		var second = await AcceptAsync(transport);
 		Assert.NotNull(second);
-		Assert.Equal(0x2222, (await second!.ReceiveAsync())!.MessageIdentification.TransactionID);
+		Assert.Equal(0x2222, (await second!.ReceiveAsync(TestToken))!.MessageIdentification.TransactionID);
 	}
 
 	[Fact]
@@ -74,8 +74,8 @@ public class UdpTransportTests
 
 		await client.SendAsync(query, query.Length, new IPEndPoint(IPAddress.Loopback, server.Port));
 
-		var receive = client.ReceiveAsync();
-		Assert.True(await Task.WhenAny(receive, Task.Delay(5000)) == receive, "The large query was not answered");
+		var receive = client.ReceiveAsync(TestToken).AsTask();
+		Assert.True(await Task.WhenAny(receive, Task.Delay(5000, TestToken)) == receive, "The large query was not answered");
 
 		var response = DnsMessage.Parse(new ArraySegment<byte>((await receive).Buffer));
 		Assert.Equal(0x3333, response.TransactionID);
@@ -98,7 +98,7 @@ public class UdpTransportTests
 
 		var connection = await AcceptAsync(transport);
 		Assert.NotNull(connection);
-		Assert.Equal(0x4444, (await connection!.ReceiveAsync())!.MessageIdentification.TransactionID);
+		Assert.Equal(0x4444, (await connection!.ReceiveAsync(TestToken))!.MessageIdentification.TransactionID);
 	}
 
 	[Fact]
@@ -122,7 +122,7 @@ public class UdpTransportTests
 
 		var connection = await AcceptAsync(transport);
 		Assert.NotNull(connection);
-		Assert.Equal(0x5555, (await connection!.ReceiveAsync())!.MessageIdentification.TransactionID);
+		Assert.Equal(0x5555, (await connection!.ReceiveAsync(TestToken))!.MessageIdentification.TransactionID);
 	}
 
 	[Fact]
@@ -131,13 +131,13 @@ public class UdpTransportTests
 		var endpoint = new IPEndPoint(IPAddress.Loopback, GetFreeUdpPort());
 		using var transport = new UdpServerTransport(endpoint);
 
-		await Assert.ThrowsAsync<InvalidOperationException>(() => transport.AcceptConnectionAsync());
+		await Assert.ThrowsAsync<InvalidOperationException>(() => transport.AcceptConnectionAsync(TestToken));
 
 		transport.Bind();
 		Assert.Throws<InvalidOperationException>(transport.Bind);
 
 		transport.Close();
-		await Assert.ThrowsAsync<InvalidOperationException>(() => transport.AcceptConnectionAsync());
+		await Assert.ThrowsAsync<InvalidOperationException>(() => transport.AcceptConnectionAsync(TestToken));
 
 		// closing again does nothing
 		transport.Close();

@@ -38,13 +38,13 @@ public class PipelinedConnectionTests
 		using var client = new DnsClient(new[] { IPAddress.Loopback }, new IClientTransport[] { transport }, true, 1000);
 
 		// a query which is never answered keeps the receive loop of the pooled connection running
-		var slow = client.ResolveAsync(DomainName.Parse("slow.example.test"));
+		var slow = client.ResolveAsync(DomainName.Parse("slow.example.test"), token: TestToken);
 		Assert.True(await transport.Connection.WaitForWaitingReceiveLoopAsync(TimeSpan.FromSeconds(5)), "The receive loop did not start");
 
 		// The response to this query is read by the running receive loop already while the query is sent,
 		// so before the client waits for the response. It used to be dropped, as no receiver was registered yet.
 		var stopwatch = Stopwatch.StartNew();
-		var fast = await client.ResolveAsync(DomainName.Parse("fast.example.test"));
+		var fast = await client.ResolveAsync(DomainName.Parse("fast.example.test"), token: TestToken);
 
 		Assert.NotNull(fast);
 		Assert.Contains(fast!.AnswerRecords.OfType<ARecord>(), a => a.Address.Equals(IPAddress.Parse("192.0.2.1")));
@@ -63,13 +63,13 @@ public class PipelinedConnectionTests
 		using var client = new DnsClient(new[] { IPAddress.Loopback }, new IClientTransport[] { transport }, true, 1000);
 
 		// a query which is never answered keeps the receive loop of the pooled connection running
-		var slow = client.ResolveAsync(DomainName.Parse("slow.example.test"));
+		var slow = client.ResolveAsync(DomainName.Parse("slow.example.test"), token: TestToken);
 		Assert.True(await transport.Connection.WaitForWaitingReceiveLoopAsync(TimeSpan.FromSeconds(5)), "The receive loop did not start");
 
 		// All messages of the zone transfer are read by the receive loop while the query is sent, so the follow-up
 		// messages arrive before the client asks for them. They used to be dropped, as only the first one had a receiver.
 		var stopwatch = Stopwatch.StartNew();
-		var response = await client.SendMessageAsync(ZoneTransferQuery());
+		var response = await client.SendMessageAsync(ZoneTransferQuery(), TestToken);
 
 		Assert.NotNull(response);
 		Assert.Equal(new[] { RecordType.Soa, RecordType.A, RecordType.A, RecordType.A, RecordType.Soa }, response!.AnswerRecords.Select(r => r.RecordType));
@@ -85,20 +85,20 @@ public class PipelinedConnectionTests
 		using var client = new DnsClient(new[] { IPAddress.Loopback }, new IClientTransport[] { transport }, true, 1000);
 
 		// the slow query opens the pooled connection and is never answered
-		var slow = client.ResolveAsync(DomainName.Parse("slow.example.test"));
+		var slow = client.ResolveAsync(DomainName.Parse("slow.example.test"), token: TestToken);
 		Assert.True(await transport.Connection.WaitForQueryAsync("slow", TimeSpan.FromSeconds(5)), "The slow query was not sent");
 
 		// the fast query uses the same connection, it is answered only after the slow query timed out
-		await Task.Delay(500);
-		var fast = client.ResolveAsync(DomainName.Parse("fast.example.test"));
+		await Task.Delay(500, TestToken);
+		var fast = client.ResolveAsync(DomainName.Parse("fast.example.test"), token: TestToken);
 		Assert.True(await transport.Connection.WaitForQueryAsync("fast", TimeSpan.FromSeconds(5)), "The fast query was not sent");
 
-		Assert.True(await Task.WhenAny(slow, Task.Delay(TimeSpan.FromSeconds(5))) == slow, "The slow query did not time out");
+		Assert.True(await Task.WhenAny(slow, Task.Delay(TimeSpan.FromSeconds(5), TestToken)) == slow, "The slow query did not time out");
 		Assert.Null(await slow);
 
 		transport.Connection.Answer("fast");
 
-		Assert.True(await Task.WhenAny(fast, Task.Delay(TimeSpan.FromSeconds(5))) == fast, "The fast query was not answered");
+		Assert.True(await Task.WhenAny(fast, Task.Delay(TimeSpan.FromSeconds(5), TestToken)) == fast, "The fast query was not answered");
 		var fastResponse = await fast;
 		Assert.NotNull(fastResponse);
 		Assert.Single(fastResponse!.AnswerRecords);
@@ -208,7 +208,7 @@ public class PipelinedConnectionTests
 		public async Task<bool> WaitForQueryAsync(string label, TimeSpan timeout)
 		{
 			var query = GetQuery(label).Task;
-			return await Task.WhenAny(query, Task.Delay(timeout)) == query;
+			return await Task.WhenAny(query, Task.Delay(timeout, TestToken)) == query;
 		}
 
 		public void Answer(string label)
@@ -271,7 +271,7 @@ public class PipelinedConnectionTests
 
 		public async Task<bool> WaitForWaitingReceiveLoopAsync(TimeSpan timeout)
 		{
-			return await Task.WhenAny(_receiveLoopWaiting.Task, Task.Delay(timeout)) == _receiveLoopWaiting.Task;
+			return await Task.WhenAny(_receiveLoopWaiting.Task, Task.Delay(timeout, TestToken)) == _receiveLoopWaiting.Task;
 		}
 
 		public async Task<bool> SendAsync(DnsRawPackage package, CancellationToken token = default)
@@ -289,7 +289,7 @@ public class PipelinedConnectionTests
 			}
 
 			// sending completes only after the receive loop read all responses
-			await Task.WhenAny(Task.WhenAll(reads), Task.Delay(TimeSpan.FromSeconds(5)));
+			await Task.WhenAny(Task.WhenAll(reads), Task.Delay(TimeSpan.FromSeconds(5), TestToken));
 			return true;
 		}
 

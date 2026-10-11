@@ -118,11 +118,11 @@ public class DnsSecValidatorTests
 		var (aboveLimit, aboveLimitRecords) = SignedAnswer(invalidSignaturesBefore: limit);
 
 		var validator = CreateValidator(new[] { _key });
-		Assert.Equal(DnsSecValidationResult.Signed, await validator.ValidateAsync(_host, RecordType.A, RecordClass.INet, withinLimit, withinLimitRecords, null, default));
-		Assert.Equal(DnsSecValidationResult.Bogus, await validator.ValidateAsync(_host, RecordType.A, RecordClass.INet, aboveLimit, aboveLimitRecords, null, default));
+		Assert.Equal(DnsSecValidationResult.Signed, await validator.ValidateAsync(_host, RecordType.A, RecordClass.INet, withinLimit, withinLimitRecords, null, TestToken));
+		Assert.Equal(DnsSecValidationResult.Bogus, await validator.ValidateAsync(_host, RecordType.A, RecordClass.INet, aboveLimit, aboveLimitRecords, null, TestToken));
 
 		// the limit applies to every validation separately
-		Assert.Equal(DnsSecValidationResult.Signed, await validator.ValidateAsync(_host, RecordType.A, RecordClass.INet, withinLimit, withinLimitRecords, null, default));
+		Assert.Equal(DnsSecValidationResult.Signed, await validator.ValidateAsync(_host, RecordType.A, RecordClass.INet, withinLimit, withinLimitRecords, null, TestToken));
 	}
 
 	[Fact]
@@ -277,7 +277,7 @@ public class DnsSecValidatorTests
 		AddSigned(message, NSec3(_child.GetNSec3Hash(NSec3HashAlgorithm.Sha1, 1, _salt), Enumerable.Repeat((byte) 0xFF, 20).ToArray(), RecordType.Ns, RecordType.RrSig));
 
 		Assert.Equal(DnsSecValidationResult.Bogus, await ValidateAsync(_child, message, new List<ARecord>()));
-		Assert.Equal(DnsSecValidationResult.Signed, await CreateValidator(new[] { _key }).ValidateAsync(_child, RecordType.Ds, RecordClass.INet, message, new List<DsRecord>(), null, default));
+		Assert.Equal(DnsSecValidationResult.Signed, await CreateValidator(new[] { _key }).ValidateAsync(_child, RecordType.Ds, RecordClass.INet, message, new List<DsRecord>(), null, TestToken));
 	}
 
 	[Fact]
@@ -306,7 +306,7 @@ public class DnsSecValidatorTests
 		AddSigned(message, new NSecRecord(_child, RecordClass.INet, 3600, DomainName.Parse("zz.example.test"), new List<RecordType> { RecordType.Ns, RecordType.RrSig, RecordType.NSec }));
 
 		Assert.Equal(DnsSecValidationResult.Bogus, await ValidateAsync(_child, message, new List<ARecord>()));
-		Assert.Equal(DnsSecValidationResult.Signed, await CreateValidator(new[] { _key }).ValidateAsync(_child, RecordType.Ds, RecordClass.INet, message, new List<DsRecord>(), null, default));
+		Assert.Equal(DnsSecValidationResult.Signed, await CreateValidator(new[] { _key }).ValidateAsync(_child, RecordType.Ds, RecordClass.INet, message, new List<DsRecord>(), null, TestToken));
 	}
 
 	[Fact]

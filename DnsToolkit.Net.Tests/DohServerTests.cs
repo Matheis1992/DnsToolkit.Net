@@ -48,11 +48,11 @@ public class DohServerTests
 
 		var post = await PostQueryAsync(http, port, 0x1111);
 		Assert.Equal(HttpStatusCode.OK, post.StatusCode);
-		AssertAnswer(await post.Content.ReadAsByteArrayAsync(), 0x1111);
+		AssertAnswer(await post.Content.ReadAsByteArrayAsync(TestToken), 0x1111);
 
-		var get = await http.GetAsync($"https://{Host}:{port}/dns-query?dns={ToBase64Url(Query(0x2222))}");
+		var get = await http.GetAsync($"https://{Host}:{port}/dns-query?dns={ToBase64Url(Query(0x2222))}", TestToken);
 		Assert.Equal(HttpStatusCode.OK, get.StatusCode);
-		AssertAnswer(await get.Content.ReadAsByteArrayAsync(), 0x2222);
+		AssertAnswer(await get.Content.ReadAsByteArrayAsync(TestToken), 0x2222);
 	}
 
 	[Fact]
@@ -63,10 +63,10 @@ public class DohServerTests
 		using var http = CreateHttpClient();
 
 		var query = LargeQuery(0x7777, 1000);
-		var response = await http.PostAsync($"https://{Host}:{port}/dns-query", DnsContent(query));
+		var response = await http.PostAsync($"https://{Host}:{port}/dns-query", DnsContent(query), TestToken);
 
 		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-		AssertAnswer(await response.Content.ReadAsByteArrayAsync(), 0x7777);
+		AssertAnswer(await response.Content.ReadAsByteArrayAsync(TestToken), 0x7777);
 	}
 
 	[Fact]
@@ -76,10 +76,10 @@ public class DohServerTests
 		using var server = StartServer(port);
 		using var http = CreateHttpClient();
 
-		var response = await http.GetAsync($"https://{Host}:{port}/dns-query?dns={ToBase64Url(LargeQuery(0x8888, 3000))}");
+		var response = await http.GetAsync($"https://{Host}:{port}/dns-query?dns={ToBase64Url(LargeQuery(0x8888, 3000))}", TestToken);
 
 		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-		AssertAnswer(await response.Content.ReadAsByteArrayAsync(), 0x8888);
+		AssertAnswer(await response.Content.ReadAsByteArrayAsync(TestToken), 0x8888);
 	}
 
 	/// <summary>
@@ -99,7 +99,7 @@ public class DohServerTests
 		HttpResponseMessage response;
 		try
 		{
-			response = await http.PostAsync($"https://{Host}:{port}/dns-query", content);
+			response = await http.PostAsync($"https://{Host}:{port}/dns-query", content, TestToken);
 		}
 		catch (HttpRequestException)
 		{
@@ -117,7 +117,7 @@ public class DohServerTests
 		using var server = StartServer(port);
 		using var http = CreateHttpClient();
 
-		var response = await http.GetAsync($"https://{Host}:{port}/dns-query?dns=");
+		var response = await http.GetAsync($"https://{Host}:{port}/dns-query?dns=", TestToken);
 
 		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
 	}
@@ -148,11 +148,11 @@ public class DohServerTests
 			// AllowedHosts would reject the host 127.0.0.1
 			var response = await PostQueryAsync(http, port, 0x3333);
 			Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-			AssertAnswer(await response.Content.ReadAsByteArrayAsync(), 0x3333);
+			AssertAnswer(await response.Content.ReadAsByteArrayAsync(TestToken), 0x3333);
 
 			// Kestrel:Endpoints would open a further port
 			using var probe = new TcpClient();
-			await Assert.ThrowsAnyAsync<SocketException>(() => probe.ConnectAsync(IPAddress.Loopback, extraPort));
+			await Assert.ThrowsAnyAsync<SocketException>(() => probe.ConnectAsync(IPAddress.Loopback, extraPort, TestToken).AsTask());
 		}
 		finally
 		{
@@ -195,15 +195,15 @@ public class DohServerTests
 			server.Start();
 			var first = await PostQueryAsync(http, port, 0x5151);
 			Assert.Equal(HttpStatusCode.OK, first.StatusCode);
-			AssertAnswer(await first.Content.ReadAsByteArrayAsync(), 0x5151);
+			AssertAnswer(await first.Content.ReadAsByteArrayAsync(TestToken), 0x5151);
 
-			await server.StopAsync();
+			await server.StopAsync(TestToken);
 			server.Start();
 
 			// the requests of the second run are not rejected, although the queue of the first run was completed
 			var second = await PostQueryAsync(http, port, 0x5252);
 			Assert.Equal(HttpStatusCode.OK, second.StatusCode);
-			AssertAnswer(await second.Content.ReadAsByteArrayAsync(), 0x5252);
+			AssertAnswer(await second.Content.ReadAsByteArrayAsync(TestToken), 0x5252);
 		}
 		finally
 		{
@@ -217,16 +217,16 @@ public class DohServerTests
 		var port = LocalDnsServer.GetFreePort();
 		using var transport = new HttpsServerTransport(LocalDnsServer.SharedCertificate, new IPEndPoint(IPAddress.Loopback, port));
 
-		await Assert.ThrowsAsync<InvalidOperationException>(() => transport.AcceptConnectionAsync());
+		await Assert.ThrowsAsync<InvalidOperationException>(() => transport.AcceptConnectionAsync(TestToken));
 
 		transport.Bind();
 		Assert.Throws<InvalidOperationException>(transport.Bind);
 
-		await transport.CloseAsync();
-		await Assert.ThrowsAsync<InvalidOperationException>(() => transport.AcceptConnectionAsync());
+		await transport.CloseAsync(TestToken);
+		await Assert.ThrowsAsync<InvalidOperationException>(() => transport.AcceptConnectionAsync(TestToken));
 
 		// closing again does nothing
-		await transport.CloseAsync();
+		await transport.CloseAsync(TestToken);
 		transport.Close();
 	}
 
@@ -248,7 +248,7 @@ public class DohServerTests
 
 		var response = await PostQueryAsync(http, port, 0x4444, "custom-dns");
 		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-		AssertAnswer(await response.Content.ReadAsByteArrayAsync(), 0x4444);
+		AssertAnswer(await response.Content.ReadAsByteArrayAsync(TestToken), 0x4444);
 
 		Assert.Equal(HttpStatusCode.NotFound, (await PostQueryAsync(http, port, 0x4444)).StatusCode);
 	}
@@ -283,8 +283,8 @@ public class DohServerTests
 
 		// an idle client takes the only connection
 		var idle = new TcpClient();
-		await idle.ConnectAsync(IPAddress.Loopback, port);
-		await Task.Delay(300);
+		await idle.ConnectAsync(IPAddress.Loopback, port, TestToken);
+		await Task.Delay(300, TestToken);
 
 		using (var http = CreateHttpClient())
 		{
@@ -309,8 +309,8 @@ public class DohServerTests
 		});
 
 		using var idle = new TcpClient();
-		await idle.ConnectAsync(IPAddress.Loopback, port);
-		await Task.Delay(300);
+		await idle.ConnectAsync(IPAddress.Loopback, port, TestToken);
+		await Task.Delay(300, TestToken);
 
 		using var http = CreateHttpClient();
 		Assert.Equal(HttpStatusCode.OK, (await PostQueryAsync(http, port, 0x1111)).StatusCode);
@@ -332,7 +332,7 @@ public class DohServerTests
 				// the slot is not yet released
 			}
 
-			await Task.Delay(100);
+			await Task.Delay(100, TestToken);
 		}
 
 		return false;
@@ -411,7 +411,7 @@ public class DohServerTests
 		try
 		{
 			var inProgress = PostQueryAsync(http, port, 0x1111);
-			Assert.True(await Task.WhenAny(received.Task, Task.Delay(TimeSpan.FromSeconds(5))) == received.Task, "The query was not received");
+			Assert.True(await Task.WhenAny(received.Task, Task.Delay(TimeSpan.FromSeconds(5), TestToken)) == received.Task, "The query was not received");
 
 			var queued = PostQueryAsync(http, port, 0x2222);
 			Assert.True(await WaitUntilAsync(() => transport.QueuedRequests == 1), "The second query was not queued");
@@ -459,7 +459,7 @@ public class DohServerTests
 		try
 		{
 			var inProgress = PostQueryAsync(http, port, 0x1111);
-			Assert.True(await Task.WhenAny(received.Task, Task.Delay(TimeSpan.FromSeconds(5))) == received.Task, "The query was not received");
+			Assert.True(await Task.WhenAny(received.Task, Task.Delay(TimeSpan.FromSeconds(5), TestToken)) == received.Task, "The query was not received");
 
 			// waits in the queue of the transport, until the client gives up
 			using (var cts = new CancellationTokenSource())
@@ -514,25 +514,25 @@ public class DohServerTests
 		try
 		{
 			var inProgress = PostQueryAsync(http, port, 0x1111);
-			Assert.True(await Task.WhenAny(received.Task, Task.Delay(TimeSpan.FromSeconds(5))) == received.Task, "The query was not received");
+			Assert.True(await Task.WhenAny(received.Task, Task.Delay(TimeSpan.FromSeconds(5), TestToken)) == received.Task, "The query was not received");
 
-			var stopping = server.StopAsync();
+			var stopping = server.StopAsync(TestToken);
 
 			// the server does not accept queries anymore, so this one waits in the queue of the transport
 			var queued = PostQueryAsync(http, port, 0x2222);
-			await Task.Delay(500);
+			await Task.Delay(500, TestToken);
 			release.TrySetResult(true);
 
 			var stopwatch = System.Diagnostics.Stopwatch.StartNew();
 
 			var answered = await inProgress;
 			Assert.Equal(HttpStatusCode.OK, answered.StatusCode);
-			AssertAnswer(await answered.Content.ReadAsByteArrayAsync(), 0x1111);
+			AssertAnswer(await answered.Content.ReadAsByteArrayAsync(TestToken), 0x1111);
 
 			var rejected = await queued;
 			Assert.Equal(HttpStatusCode.ServiceUnavailable, rejected.StatusCode);
 
-			Assert.True(await Task.WhenAny(stopping, Task.Delay(shutdownTimeout)) == stopping, "The server did not stop");
+			Assert.True(await Task.WhenAny(stopping, Task.Delay(shutdownTimeout, TestToken)) == stopping, "The server did not stop");
 			await stopping;
 			Assert.InRange(stopwatch.Elapsed, TimeSpan.Zero, TimeSpan.FromSeconds(3));
 		}
@@ -553,7 +553,7 @@ public class DohServerTests
 		{
 			if (condition())
 				return true;
-			await Task.Delay(20);
+			await Task.Delay(20, TestToken);
 		}
 
 		return condition();
