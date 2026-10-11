@@ -1,0 +1,6 @@
+# Rules for the library only. Tests continue on their synchronization context.
+
+[*.cs]
+# A library must not continue on the synchronization context of its caller: it is not needed, costs a thread switch and
+# deadlocks a caller, which waits synchronously on a thread with a synchronization context, like a UI thread
+dotnet_diagnostic.CA2007.severity = error

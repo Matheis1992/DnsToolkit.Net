@@ -1,14 +1,15 @@
-﻿#region Copyright and License
+#region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
-// 
+// Modifications Copyright 2026 Matheis1992
+//
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //   http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -16,95 +17,122 @@
 // limitations under the License.
 #endregion
 
-using System;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Linq;
 using System.Net;
-using System.Text;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Internal;
 
 namespace DnsToolkit.Net.Dns
 {
+	/// <summary>
+	///   Caches the nameserver addresses of zones. Every address expires on its own, a zone is removed with its
+	///   last address. The cache is limited in size, the zones used least recently are removed first.
+	/// </summary>
 	internal class NameserverCache
 	{
-		private class CacheValue
+		/// <summary>
+		///   The default maximum number of cached addresses of all zones
+		/// </summary>
+		public const long DEFAULT_SIZE_LIMIT = 50_000;
+
+		/// <summary>
+		///   The maximum number of addresses of a zone. A zone has a few name servers with a few addresses each, so more
+		///   addresses only come from a server, which keeps adding new ones, e.g. with every referral.
+		/// </summary>
+		internal const int MAX_ADDRESSES_PER_ZONE = 32;
+
+		private static readonly TimeSpan _defaultExpirationScanFrequency = TimeSpan.FromMinutes(1);
+
+		/// <summary>
+		///   The addresses of a zone with their expiration
+		/// </summary>
+		private class ZoneAddresses
 		{
-			public DateTime ExpireDateUtc { get; }
-			public IPAddress Address { get; }
-
-			public CacheValue(int timeToLive, IPAddress address)
-			{
-				ExpireDateUtc = DateTime.UtcNow.AddSeconds(timeToLive);
-				Address = address;
-			}
-
-			public override int GetHashCode()
-			{
-				return Address.GetHashCode();
-			}
-
-			public override bool Equals(object? obj)
-			{
-				CacheValue? second = obj as CacheValue;
-
-				if (second == null)
-					return false;
-
-				return Address.Equals(second.Address);
-			}
+			public readonly Dictionary<IPAddress, DateTime> ExpireDatesUtc = new();
 		}
 
-		private readonly ConcurrentDictionary<DomainName, HashSet<CacheValue>> _cache = new ConcurrentDictionary<DomainName, HashSet<CacheValue>>();
+		private readonly MemoryCache _cache;
+		private readonly ISystemClock _clock;
+
+		// serializes the read-modify-write of zone entries, adding nameservers is rare compared to lookups
+		private readonly object _addLock = new();
+
+		public NameserverCache()
+			: this(DEFAULT_SIZE_LIMIT, _defaultExpirationScanFrequency) { }
+
+		/// <param name="sizeLimit">The maximum number of cached addresses of all zones</param>
+		/// <param name="expirationScanFrequency">The minimum time between two scans for expired zones</param>
+		/// <param name="clock">The clock for the time to live of the addresses, the system clock if null</param>
+		internal NameserverCache(long sizeLimit, TimeSpan expirationScanFrequency, ISystemClock? clock = null)
+		{
+			_clock = clock ?? new SystemClock();
+
+			// the cache uses the same clock, so the removal of expired zones agrees with the time to live
+			_cache = new MemoryCache(new MemoryCacheOptions
+			{
+				SizeLimit = sizeLimit,
+				ExpirationScanFrequency = expirationScanFrequency,
+				Clock = _clock,
+			});
+		}
+
+		/// <summary>
+		///   The number of zones
+		/// </summary>
+		internal int Count => _cache.Count;
 
 		public void Add(DomainName zoneName, IPAddress address, int timeToLive)
 		{
-			HashSet<CacheValue>? addresses;
+			var utcNow = _clock.UtcNow.UtcDateTime;
+			var expireDateUtc = utcNow.AddSeconds(timeToLive);
 
-			if (_cache.TryGetValue(zoneName, out addresses))
+			lock (_addLock)
 			{
-				lock (addresses)
+				var zone = _cache.TryGetValue(zoneName, out ZoneAddresses? existing) ? existing! : new ZoneAddresses();
+
+				DateTime zoneExpireDateUtc;
+				int addressCount;
+				lock (zone)
 				{
-					addresses.Add(new CacheValue(timeToLive, address));
+					// replaces the expiration of a known address
+					zone.ExpireDatesUtc[address] = expireDateUtc;
+					RemoveExpired(zone, utcNow);
+
+					// the addresses, which expire first, are dropped
+					if (zone.ExpireDatesUtc.Count > MAX_ADDRESSES_PER_ZONE)
+					{
+						foreach (var dropped in zone.ExpireDatesUtc.OrderBy(x => x.Value).Take(zone.ExpireDatesUtc.Count - MAX_ADDRESSES_PER_ZONE).Select(x => x.Key).ToList())
+							zone.ExpireDatesUtc.Remove(dropped);
+					}
+
+					if (zone.ExpireDatesUtc.Count == 0)
+					{
+						_cache.Remove(zoneName);
+						return;
+					}
+
+					zoneExpireDateUtc = zone.ExpireDatesUtc.Values.Max();
+					addressCount = zone.ExpireDatesUtc.Count;
 				}
-			}
-			else
-			{
-				_cache.TryAdd(zoneName, new HashSet<CacheValue>() { new CacheValue(timeToLive, address) });
+
+				// The expiration of a cache entry cannot be changed, so the entry is set again. Every address counts towards the
+				// size limit, so a zone with many addresses cannot use more memory than the limit allows.
+				_cache.Set(zoneName, zone, new MemoryCacheEntryOptions
+				{
+					AbsoluteExpiration = new DateTimeOffset(zoneExpireDateUtc, TimeSpan.Zero),
+					Size = addressCount,
+				});
 			}
 		}
 
 		public bool TryGetAddresses(DomainName zoneName, out List<IPAddress>? addresses)
 		{
-			DateTime utcNow = DateTime.UtcNow;
-
-			HashSet<CacheValue>? cacheValues;
-			if (_cache.TryGetValue(zoneName, out cacheValues))
+			if (_cache.TryGetValue(zoneName, out ZoneAddresses? zone))
 			{
-				addresses = new List<IPAddress>();
-				bool needsCleanup = false;
+				var utcNow = _clock.UtcNow.UtcDateTime;
 
-				lock (cacheValues)
+				lock (zone!)
 				{
-					foreach (CacheValue cacheValue in cacheValues)
-					{
-						if (cacheValue.ExpireDateUtc < utcNow)
-						{
-							needsCleanup = true;
-						}
-						else
-						{
-							addresses.Add(cacheValue.Address);
-						}
-					}
-
-					if (needsCleanup)
-					{
-						cacheValues.RemoveWhere(x => x.ExpireDateUtc < utcNow);
-						if (cacheValues.Count == 0)
-#pragma warning disable 0728
-							_cache.TryRemove(zoneName, out cacheValues);
-#pragma warning restore 0728
-					}
+					addresses = zone.ExpireDatesUtc.Where(x => x.Value > utcNow).Select(x => x.Key).ToList();
 				}
 
 				if (addresses.Count > 0)
@@ -115,21 +143,10 @@ namespace DnsToolkit.Net.Dns
 			return false;
 		}
 
-		public void RemoveExpiredItems()
+		private static void RemoveExpired(ZoneAddresses zone, DateTime utcNow)
 		{
-			DateTime utcNow = DateTime.UtcNow;
-
-			foreach (var kvp in _cache)
-			{
-				lock (kvp.Value)
-				{
-					HashSet<CacheValue>? tmp;
-
-					kvp.Value.RemoveWhere(x => x.ExpireDateUtc < utcNow);
-					if (kvp.Value.Count == 0)
-						_cache.TryRemove(kvp.Key, out tmp);
-				}
-			}
+			foreach (var expired in zone.ExpireDatesUtc.Where(x => x.Value <= utcNow).Select(x => x.Key).ToList())
+				zone.ExpireDatesUtc.Remove(expired);
 		}
 	}
 }

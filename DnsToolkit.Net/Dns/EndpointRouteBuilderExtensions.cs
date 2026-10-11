@@ -1,5 +1,6 @@
 ﻿#region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
+// Modifications Copyright 2026 Matheis1992
 // 
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
 // 
@@ -30,6 +31,11 @@ public static class EndpointRouteBuilderExtensions
 
 	internal delegate Task<DnsRawPackage?> DnsRawPackageDelegate(DnsReceivedRawPackage query, HttpContext context, CancellationToken token);
 
+	/// <summary>
+	///   Thrown by a <see cref="DnsRawPackageDelegate" />, if the server does not accept queries anymore, e.g. because it is stopping
+	/// </summary>
+	internal sealed class ServiceUnavailableException : Exception { }
+
 	public static IEndpointConventionBuilder MapDnsOverHttps(
 		this IEndpointRouteBuilder endpoints,
 		DnsHttpsRequestDelegate handler)
@@ -55,14 +61,14 @@ public static class EndpointRouteBuilderExtensions
 		}
 		catch
 		{
-			await Results.StatusCode((int) HttpStatusCode.UnprocessableEntity).ExecuteAsync(ctx);
+			await Results.StatusCode((int) HttpStatusCode.UnprocessableEntity).ExecuteAsync(ctx).ConfigureAwait(false);
 			return null;
 		}
 
 		DnsMessageBase? dnsResponse = null;
 		try
 		{
-			dnsResponse = await handler(dnsQuery, ctx, token);
+			dnsResponse = await handler(dnsQuery, ctx, token).ConfigureAwait(false);
 		}
 		catch
 		{
@@ -82,63 +88,86 @@ public static class EndpointRouteBuilderExtensions
 
 	private const string _DOH_CONTENT_TYPE = "application/dns-message";
 
-	private static async Task HandleRequestAsync(HttpContext ctx, CancellationToken token, DnsRawPackageDelegate handler)
+	/// <summary>
+	///   The maximum size of a DNS message, given by its two byte length in the wire format (RFC 8484 section 6)
+	/// </summary>
+	private const int _MAX_MESSAGE_SIZE = UInt16.MaxValue;
+
+	// internal for the tests, which call it with a simulated request
+	internal static async Task HandleRequestAsync(HttpContext ctx, CancellationToken token, DnsRawPackageDelegate handler)
 	{
-		string? contentType;
 		byte[] content;
 
 		if (ctx.Request.Method == HttpMethod.Get.Method)
 		{
-			if (!ctx.Request.Query.TryGetValue("dns", out var queryValues) || queryValues.Count != 1)
+			var queryText = ctx.Request.Query.TryGetValue("dns", out var queryValues) && queryValues.Count == 1 ? queryValues[0] : null;
+
+			if (String.IsNullOrEmpty(queryText))
 			{
-				await Results.BadRequest().ExecuteAsync(ctx);
+				await Results.BadRequest().ExecuteAsync(ctx).ConfigureAwait(false);
 				return;
 			}
 
 			try
 			{
-				var queryText = queryValues[0];
-
 				var requiredPadding = (4 - queryText.Length % 4) % 4;
 
 				content = (queryText + new string('=', requiredPadding)).FromBase64UrlString(2);
 			}
 			catch
 			{
-				await Results.BadRequest().ExecuteAsync(ctx);
+				await Results.BadRequest().ExecuteAsync(ctx).ConfigureAwait(false);
 				return;
 			}
-
-			contentType = _DOH_CONTENT_TYPE;
 		}
 		else if (ctx.Request.Method == HttpMethod.Post.Method)
 		{
+			// checked before the body is read, so the body of a request, which is rejected anyway, is not read
+			if (ctx.Request.ContentType != _DOH_CONTENT_TYPE)
+			{
+				await Results.StatusCode((int) HttpStatusCode.UnsupportedMediaType).ExecuteAsync(ctx).ConfigureAwait(false);
+				return;
+			}
+
+			if (ctx.Request.ContentLength > _MAX_MESSAGE_SIZE)
+			{
+				await Results.StatusCode((int) HttpStatusCode.RequestEntityTooLarge).ExecuteAsync(ctx).ConfigureAwait(false);
+				return;
+			}
+
+			// Limit the body before reading it, so a larger body (e.g. without Content-Length) is aborted while
+			// reading instead of being buffered completely. A lower limit set for the server is kept.
+			var bodySizeFeature = ctx.Features.Get<IHttpMaxRequestBodySizeFeature>();
+			if ((bodySizeFeature != null) && !bodySizeFeature.IsReadOnly && !(bodySizeFeature.MaxRequestBodySize < _MAX_MESSAGE_SIZE))
+				bodySizeFeature.MaxRequestBodySize = _MAX_MESSAGE_SIZE;
+
 			using var ms = new MemoryStream();
 
 			ms.WriteByte(0);
 			ms.WriteByte(0);
 
-			await ctx.Request.Body.CopyToAsync(ms, token);
+			try
+			{
+				await ctx.Request.Body.CopyToAsync(ms, token).ConfigureAwait(false);
+			}
+			catch (BadHttpRequestException ex) when (ex.StatusCode == (int) HttpStatusCode.RequestEntityTooLarge)
+			{
+				await Results.StatusCode((int) HttpStatusCode.RequestEntityTooLarge).ExecuteAsync(ctx).ConfigureAwait(false);
+				return;
+			}
 
 			content = ms.ToArray();
-
-			contentType = ctx.Request.ContentType;
 		}
 		else
 		{
-			await Results.StatusCode((int) HttpStatusCode.MethodNotAllowed).ExecuteAsync(ctx);
+			await Results.StatusCode((int) HttpStatusCode.MethodNotAllowed).ExecuteAsync(ctx).ConfigureAwait(false);
 			return;
 		}
 
-		if (contentType != _DOH_CONTENT_TYPE)
+		// the content contains the two bytes of the length header
+		if (content.Length - 2 > _MAX_MESSAGE_SIZE)
 		{
-			await Results.StatusCode((int) HttpStatusCode.UnsupportedMediaType).ExecuteAsync(ctx);
-			return;
-		}
-
-		if (content.Length > 512)
-		{
-			await Results.StatusCode((int) HttpStatusCode.MethodNotAllowed).ExecuteAsync(ctx);
+			await Results.StatusCode((int) HttpStatusCode.RequestEntityTooLarge).ExecuteAsync(ctx).ConfigureAwait(false);
 			return;
 		}
 
@@ -155,18 +184,28 @@ public static class EndpointRouteBuilderExtensions
 		DnsMessageBase.EncodeUShort(content, 0, (ushort) (content.Length - 2));
 		var receivedPackage = new DnsReceivedRawPackage(content, remoteEndpoint, localEndpoint);
 
-		var response = await handler(receivedPackage, ctx, token);
+		DnsRawPackage? response;
+		try
+		{
+			response = await handler(receivedPackage, ctx, token).ConfigureAwait(false);
+		}
+		catch (ServiceUnavailableException)
+		{
+			// the client can retry immediately, e.g. with another server
+			await Results.StatusCode((int) HttpStatusCode.ServiceUnavailable).ExecuteAsync(ctx).ConfigureAwait(false);
+			return;
+		}
 
 		if (response == null)
 		{
-			await Results.StatusCode((int) HttpStatusCode.InternalServerError).ExecuteAsync(ctx);
+			await Results.StatusCode((int) HttpStatusCode.InternalServerError).ExecuteAsync(ctx).ConfigureAwait(false);
 		}
 		else
 		{
 			ctx.Response.ContentType = _DOH_CONTENT_TYPE;
 			ctx.Response.ContentLength = response.Length;
 			ctx.Response.StatusCode = (int) HttpStatusCode.OK;
-			await ctx.Response.Body.WriteAsync(response.ToArraySegment(false), token);
+			await ctx.Response.Body.WriteAsync(response.ToArraySegment(false), token).ConfigureAwait(false);
 		}
 	}
 }

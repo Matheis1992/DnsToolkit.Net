@@ -1,5 +1,6 @@
 ﻿#region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
+// Modifications Copyright 2026 Matheis1992
 // 
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
 // 
@@ -71,56 +72,11 @@ namespace DnsToolkit.Net.Dns
 		/// <param name="recordType"> Type the should be queried </param>
 		/// <param name="recordClass"> Class the should be queried </param>
 		/// <returns> A list of matching <see cref="DnsRecordBase">records</see> </returns>
+		[Obsolete("Blocks the calling thread while waiting for the DNS responses. Use ResolveAsync instead.")]
 		public List<T> Resolve<T>(DomainName name, RecordType recordType = RecordType.A, RecordClass recordClass = RecordClass.INet)
 			where T : DnsRecordBase
 		{
-			_ = name ?? throw new ArgumentNullException(nameof(name), "Name must be provided");
-
-			return ResolveInternal<T>(name, recordType, recordClass, new ResolveLoopProtector());
-		}
-
-		private List<T> ResolveInternal<T>(DomainName name, RecordType recordType, RecordClass recordClass, ResolveLoopProtector resolveLoopProtector) where T : DnsRecordBase
-		{
-			using (resolveLoopProtector.AddOrThrow(name, recordType, recordClass))
-			{
-				if (_cache.TryGetRecords(name, recordType, recordClass, out List<T>? records))
-				{
-					return records!;
-				}
-
-				DnsMessage? msg = _dnsClient.Resolve(name, recordType, recordClass);
-
-				if ((msg == null) || ((msg.ReturnCode != ReturnCode.NoError) && (msg.ReturnCode != ReturnCode.NxDomain)))
-				{
-					throw new Exception("DNS request failed");
-				}
-
-				CNameRecord? cName = msg.AnswerRecords.Where(x => (x.RecordType == RecordType.CName) && (x.RecordClass == recordClass) && x.Name.Equals(name)).OfType<CNameRecord>().FirstOrDefault();
-
-				if (recordType != RecordType.CName && cName != null)
-				{
-					records = msg.AnswerRecords.Where(x => x.Name.Equals(cName.CanonicalName)).OfType<T>().ToList();
-					if (records.Count > 0)
-					{
-						_cache.Add(name, recordType, recordClass, records, DnsSecValidationResult.Indeterminate, records.Min(x => x.TimeToLive));
-						return records;
-					}
-
-					records = ResolveInternal<T>(cName.CanonicalName, recordType, recordClass, resolveLoopProtector);
-
-					if (records.Count > 0)
-						_cache.Add(name, recordType, recordClass, records, DnsSecValidationResult.Indeterminate, records.Min(x => x.TimeToLive));
-
-					return records;
-				}
-
-				records = msg.AnswerRecords.Where(x => x.Name.Equals(name)).OfType<T>().ToList();
-
-				if (records.Count > 0)
-					_cache.Add(name, recordType, recordClass, records, DnsSecValidationResult.Indeterminate, records.Min(x => x.TimeToLive));
-
-				return records;
-			}
+			return ResolveAsync<T>(name, recordType, recordClass).GetAwaiter().GetResult();
 		}
 
 		/// <summary>
@@ -137,7 +93,7 @@ namespace DnsToolkit.Net.Dns
 		{
 			_ = name ?? throw new ArgumentNullException(nameof(name), "Name must be provided");
 
-			return await ResolveAsyncInternal<T>(name, recordType, recordClass, token, new ResolveLoopProtector());
+			return await ResolveAsyncInternal<T>(name, recordType, recordClass, token, new ResolveLoopProtector()).ConfigureAwait(false);
 		}
 
 		private async Task<List<T>> ResolveAsyncInternal<T>(DomainName name, RecordType recordType, RecordClass recordClass, CancellationToken token, ResolveLoopProtector resolveLoopProtector) where T : DnsRecordBase
@@ -149,7 +105,7 @@ namespace DnsToolkit.Net.Dns
 					return records!;
 				}
 
-				var msg = await _dnsClient.ResolveAsync(name, recordType, recordClass, DnsQueryOptions.DefaultQueryOptions, token);
+				var msg = await _dnsClient.ResolveAsync(name, recordType, recordClass, DnsQueryOptions.DefaultQueryOptions, token).ConfigureAwait(false);
 
 				if ((msg == null) || ((msg.ReturnCode != ReturnCode.NoError) && (msg.ReturnCode != ReturnCode.NxDomain)))
 				{
@@ -158,7 +114,8 @@ namespace DnsToolkit.Net.Dns
 
 				var cName = msg.AnswerRecords.Where(x => (x.RecordType == RecordType.CName) && (x.RecordClass == recordClass) && x.Name.Equals(name)).OfType<CNameRecord>().FirstOrDefault();
 
-				if (cName != null)
+				// a query for the CNAME itself is answered with it, otherwise the alias is followed
+				if ((recordType != RecordType.CName) && (cName != null))
 				{
 					records = msg.AnswerRecords.Where(x => (x.RecordType == recordType) && (x.RecordClass == recordClass) && x.Name.Equals(cName.CanonicalName)).OfType<T>().ToList();
 					if (records.Count > 0)
@@ -167,7 +124,7 @@ namespace DnsToolkit.Net.Dns
 						return records;
 					}
 
-					records = await ResolveAsyncInternal<T>(cName.CanonicalName, recordType, recordClass, token, resolveLoopProtector);
+					records = await ResolveAsyncInternal<T>(cName.CanonicalName, recordType, recordClass, token, resolveLoopProtector).ConfigureAwait(false);
 
 					if (records.Count > 0)
 						_cache.Add(name, recordType, recordClass, records, DnsSecValidationResult.Indeterminate, Math.Min(cName.TimeToLive, records.Min(x => x.TimeToLive)));

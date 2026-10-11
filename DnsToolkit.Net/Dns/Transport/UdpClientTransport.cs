@@ -1,5 +1,6 @@
 #region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
+// Modifications Copyright 2026 Matheis1992
 // 
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
 // 
@@ -79,7 +80,7 @@ namespace DnsToolkit.Net.Dns
 
 			try
 			{
-				await socket.ConnectAsync(endpointInfo.DestinationAddress, _port, token).AsTask().WithTimeout(queryTimeout, token);
+				await socket.ConnectAsync(endpointInfo.DestinationAddress, _port, token).AsTask().WithTimeout(queryTimeout, token).ConfigureAwait(false);
 
 				return new UdpClientConnection(this, endpointInfo, socket, queryTimeout);
 			}
@@ -126,7 +127,7 @@ namespace DnsToolkit.Net.Dns
 			{
 				try
 				{
-					var sentBytes = await _socket.SendAsync(package.ToArraySegment(false), SocketFlags.None).WithTimeout(_queryTimeout, token);
+					var sentBytes = await _socket.SendAsync(package.ToArraySegment(false), SocketFlags.None).WithTimeout(_queryTimeout, token).ConfigureAwait(false);
 
 					if (sentBytes < package.Length)
 					{
@@ -145,11 +146,13 @@ namespace DnsToolkit.Net.Dns
 
 			private async Task<DnsReceivedRawPackage?> ReceiveAsync(CancellationToken token = new())
 			{
-				var buffer = new byte[_socket.ReceiveBufferSize + DnsRawPackage.LENGTH_HEADER_LENGTH];
+				var buffer = UdpReceiveBuffer.Rent();
+				Task<int>? receiveTask = null;
 
 				try
 				{
-					var length = await _socket.ReceiveAsync(new ArraySegment<byte>(buffer, DnsRawPackage.LENGTH_HEADER_LENGTH, buffer.Length - DnsRawPackage.LENGTH_HEADER_LENGTH), SocketFlags.None).WithTimeout(_queryTimeout, token);
+					receiveTask = _socket.ReceiveAsync(UdpReceiveBuffer.GetReceiveSegment(buffer), SocketFlags.None);
+					var length = await receiveTask.WithTimeout(_queryTimeout, token).ConfigureAwait(false);
 
 					if (length == 0)
 					{
@@ -157,21 +160,23 @@ namespace DnsToolkit.Net.Dns
 						return null;
 					}
 
-					DnsMessageBase.EncodeUShort(buffer, 0, (ushort) length);
-
-					return new DnsReceivedRawPackage(buffer, (IPEndPoint) _socket.RemoteEndPoint!, (IPEndPoint) _socket.LocalEndPoint!);
+					return new DnsReceivedRawPackage(UdpReceiveBuffer.CopyMessage(buffer, length), (IPEndPoint) _socket.RemoteEndPoint!, (IPEndPoint) _socket.LocalEndPoint!);
 				}
 				catch
 				{
 					MarkFaulty();
 					return null;
 				}
+				finally
+				{
+					UdpReceiveBuffer.Return(buffer, receiveTask);
+				}
 			}
 
 			public async Task<DnsReceivedRawPackage?> ReceiveAsync(DnsMessageIdentification identification, CancellationToken token)
 			{
 				DnsReceivedRawPackage? package;
-				while ((package = await ReceiveAsync(token)) != null)
+				while ((package = await ReceiveAsync(token).ConfigureAwait(false)) != null)
 				{
 					if (package.MessageIdentification.Equals(identification))
 						return package;

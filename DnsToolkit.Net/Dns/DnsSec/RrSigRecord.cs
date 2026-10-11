@@ -1,5 +1,6 @@
 ﻿#region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
+// Modifications Copyright 2026 Matheis1992
 // 
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
 // 
@@ -210,17 +211,53 @@ namespace DnsToolkit.Net.Dns
 			return new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(timeStamp).ToLocalTime();
 		}
 
-		internal bool Verify<T>(List<T> coveredRecords, IEnumerable<DnsKeyRecord> dnsKeys)
+		/// <param name="coveredRecords">The records covered by the signature</param>
+		/// <param name="dnsKeys">The keys of the signer</param>
+		/// <param name="budget">
+		///   The work left for validating the response. Only the given number of keys with the same algorithm and key tag
+		///   are tried and every verification is counted, as the keys of an attacker could otherwise make it take very long (KeyTrap).
+		/// </param>
+		internal bool Verify<T>(List<T> coveredRecords, IEnumerable<DnsKeyRecord> dnsKeys, DnsSecValidationBudget? budget = null)
 			where T : DnsRecordBase
 		{
 			byte[] messageData;
 			int length;
 
+			// The labels of the signature must not exceed the labels of the owner name (RFC 4035, section 5.3.1). Such a
+			// signature covers no record, it must not prevent the validation with another signature.
+			if (coveredRecords.Any(x => x.Name.LabelCount < Labels))
+				return false;
+
 			EncodeSigningBuffer(coveredRecords, out messageData, out length);
 
-			return dnsKeys
-				.Where(x => x.IsZoneKey && (x.Protocol == 3) && x.Algorithm.IsSupported() && (KeyTag == x.CalculateKeyTag()))
-				.Any(x => x.Verify(messageData, length, Signature));
+			// the algorithm of the key has to match the one of the signature (RFC 4035, section 5.3.1)
+			var keys = dnsKeys.Where(x => x.IsZoneKey && (x.Protocol == 3) && (x.Algorithm == Algorithm) && x.Algorithm.IsSupported() && (KeyTag == x.CalculateKeyTag()));
+
+			if (budget != null)
+				keys = keys.Take(budget.MaxDnsKeysPerKeyTag);
+
+			foreach (var key in keys)
+			{
+				budget?.ConsumeSignatureValidation();
+
+				if (TryVerify(key, messageData, length))
+					return true;
+			}
+
+			return false;
+		}
+
+		private bool TryVerify(DnsKeyRecord key, byte[] messageData, int length)
+		{
+			try
+			{
+				return key.Verify(messageData, length, Signature);
+			}
+			catch (Exception e) when (e is not DnsSecValidationLimitExceededException)
+			{
+				// a malformed key does not verify the signature, but must not prevent the validation with another key
+				return false;
+			}
 		}
 
 		internal void Resign(List<DnsRecordBase> records, List<DnsKeyRecord> keys)

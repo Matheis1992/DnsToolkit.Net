@@ -1,5 +1,6 @@
 ﻿#region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
+// Modifications Copyright 2026 Matheis1992
 // 
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
 // 
@@ -130,7 +131,7 @@ namespace DnsToolkit.Net.Dns
 			       + " " + (byte) Flags
 			       + " " + Iterations
 			       + " " + ((Salt.Length == 0) ? "-" : Salt.ToBase16String())
-			       + " " + NextHashedOwner.ToBase32String()
+			       + " " + NextHashedOwner.ToBase32HexString()
 			       + " " + String.Join(" ", Types.Select(RecordTypeHelper.ToShortString));
 		}
 
@@ -152,7 +153,7 @@ namespace DnsToolkit.Net.Dns
 
 		internal bool IsCovering(DomainName name)
 		{
-			DomainName nextDomainName = new DomainName(NextHashedOwner.ToBase32String(), name.GetParentName());
+			DomainName nextDomainName = new DomainName(NextHashedOwner.ToBase32HexString(), name.GetParentName());
 
 			if (Name.CompareTo(nextDomainName) < 0)
 			{

@@ -1,5 +1,6 @@
 #region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
+// Modifications Copyright 2026 Matheis1992
 // 
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
 // 
@@ -95,7 +96,7 @@ public class HttpsClientTransport : IClientTransport
 			var content = new ByteArrayContent(package.ToArraySegment(false).ToArray());
 			content.Headers.ContentType = new MediaTypeHeaderValue("application/dns-message");
 
-			var response = await _client.PostAsync(_uri, content, token);
+			var response = await _client.PostAsync(_uri, content, token).ConfigureAwait(false);
 
 			if (!response.IsSuccessStatusCode)
 				return false;
@@ -104,7 +105,7 @@ public class HttpsClientTransport : IClientTransport
 			ms.WriteByte(0);
 			ms.WriteByte(0);
 
-			await response.Content.CopyToAsync(ms, token);
+			await response.Content.CopyToAsync(ms, token).ConfigureAwait(false);
 
 			var buffer = ms.ToArray();
 			DnsMessageBase.EncodeUShort(buffer, 0, (ushort) (buffer.Length - 2));

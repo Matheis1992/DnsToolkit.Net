@@ -1,5 +1,6 @@
 ﻿#region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
+// Modifications Copyright 2026 Matheis1992
 // 
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
 // 
@@ -21,6 +22,8 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace DnsToolkit.Net.Dns
 {
@@ -61,20 +64,31 @@ namespace DnsToolkit.Net.Dns
 		///   Forces to update all hints using the given resolver
 		/// </summary>
 		/// <param name="resolver">The resolver to use for resolving the new hints</param>
+		[Obsolete("Blocks the calling thread while waiting for the DNS responses. Use UpdateAsync instead.")]
 		public void Update(IDnsResolver resolver)
+		{
+			UpdateAsync(resolver).GetAwaiter().GetResult();
+		}
+
+		/// <summary>
+		///   Forces to update all hints using the given resolver as an asynchronous operation
+		/// </summary>
+		/// <param name="resolver">The resolver to use for resolving the new hints</param>
+		/// <param name="token"> The token to monitor cancellation requests </param>
+		public async Task UpdateAsync(IDnsResolver resolver, CancellationToken token = default)
 		{
 			Zone zone = new Zone(DomainName.Root);
 
-			var nameServer = resolver.Resolve<NsRecord>(DomainName.Root, RecordType.Ns);
+			var nameServer = await resolver.ResolveAsync<NsRecord>(DomainName.Root, RecordType.Ns, token: token).ConfigureAwait(false);
 			zone.AddRange(nameServer);
 
 			foreach (var nsRecord in nameServer)
 			{
-				zone.AddRange(resolver.Resolve<ARecord>(nsRecord.NameServer, RecordType.A));
-				zone.AddRange(resolver.Resolve<AaaaRecord>(nsRecord.NameServer, RecordType.Aaaa));
+				zone.AddRange(await resolver.ResolveAsync<ARecord>(nsRecord.NameServer, RecordType.A, token: token).ConfigureAwait(false));
+				zone.AddRange(await resolver.ResolveAsync<AaaaRecord>(nsRecord.NameServer, RecordType.Aaaa, token: token).ConfigureAwait(false));
 			}
 
-			zone.AddRange(resolver.Resolve<DnsKeyRecord>(DomainName.Root, RecordType.DnsKey).Where(x => x.IsSecureEntryPoint));
+			zone.AddRange((await resolver.ResolveAsync<DnsKeyRecord>(DomainName.Root, RecordType.DnsKey, token: token).ConfigureAwait(false)).Where(x => x.IsSecureEntryPoint));
 
 			LoadZoneInternal(zone);
 

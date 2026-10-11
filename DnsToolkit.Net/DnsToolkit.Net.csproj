@@ -8,6 +8,8 @@
     <BaseOutputPath>..\bin</BaseOutputPath>
     <BaseIntermediateOutputPath></BaseIntermediateOutputPath>
     <Nullable>enable</Nullable>
+    <!-- the analyzers only run for .NET 5 or later by default, the code for netstandard2.0 is checked as well -->
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
     <Title>DnsToolkit.Net - C#/.Net DNS client/server, DNSSEC, DANE and SPF Library</Title>
     <Authors>Alexander Reinert, Matheis1992</Authors>
     <Description>A complete managed .Net DNS and DNSSEC client, a DNS server (UDP, TCP, TLS, HTTPS), DANE validation and SPF and SenderID validation. Targets netstandard2.0, net8.0 and net10.0. Based on ARSoft.Tools.Net by Alexander Reinert.</Description>
@@ -18,7 +20,9 @@
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <PackageRequireLicenseAcceptance>true</PackageRequireLicenseAcceptance>
     <Copyright>Copyright 2010..2024 Alexander Reinert, 2026 Matheis1992</Copyright>
-    <VersionPrefix>3.7.0</VersionPrefix>
+    <!-- a new package, so it starts at 1.0.0 instead of continuing the versions of ARSoft.Tools.Net; the suffix is removed for the release -->
+    <VersionPrefix>1.0.0</VersionPrefix>
+    <VersionSuffix>preview.1</VersionSuffix>
   </PropertyGroup>
 
   <ItemGroup>
@@ -30,9 +34,14 @@
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
-    <PackageReference Include="System.Memory" Version="4.5.5" />
+    <!-- part of the ASP.NET Core shared framework on net8.0+ -->
+    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="10.0.12" />
+    <PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="10.0.12" />
+    <PackageReference Include="System.IO.Pipelines" Version="10.0.12" />
+    <PackageReference Include="System.Memory" Version="4.6.3" />
     <PackageReference Include="System.Text.Json" Version="8.0.5" />
-    <PackageReference Include="System.Threading.Tasks.Extensions" Version="4.5.4" />
+    <PackageReference Include="System.Threading.Channels" Version="10.0.12" />
+    <PackageReference Include="System.Threading.Tasks.Extensions" Version="4.6.3" />
     <PackageReference Include="PolySharp" Version="1.15.0">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
@@ -41,6 +50,7 @@
     <!-- The DNS over HTTPS server requires ASP.NET Core and is only available on net8.0+ -->
     <Compile Remove="Dns\EndpointRouteBuilderExtensions.cs" />
     <Compile Remove="Dns\Transport\HttpsServerTransport.cs" />
+    <Compile Remove="Dns\Transport\HttpsServerTransportOptions.cs" />
   </ItemGroup>
 
   <ItemGroup>

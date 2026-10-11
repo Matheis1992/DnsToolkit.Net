@@ -1,5 +1,6 @@
 #region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
+// Modifications Copyright 2026 Matheis1992
 // 
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
 // 
@@ -53,12 +54,20 @@ public abstract class TcpClientTransportBase<TTransport> : PipelinedClientTransp
 
 		try
 		{
-			if (!await client.TryConnectAsync(endpointInfo.DestinationAddress, _port, queryTimeout, token))
+			if (!await client.TryConnectAsync(endpointInfo.DestinationAddress, _port, queryTimeout, token).ConfigureAwait(false))
 			{
 				return null;
 			}
 
-			var stream = await GetStreamAsync(client, token);
+			// Limit the stream setup (e.g. the TLS handshake), as the connect task is shared by all queries to this server
+			Stream? stream;
+			using (var setupCts = CancellationTokenSource.CreateLinkedTokenSource(token))
+			{
+				if (queryTimeout > 0)
+					setupCts.CancelAfter(queryTimeout);
+
+				stream = await GetStreamAsync(client, setupCts.Token).ConfigureAwait(false);
+			}
 
 			if (stream == null)
 			{
@@ -82,7 +91,7 @@ public abstract class TcpClientTransportBase<TTransport> : PipelinedClientTransp
 		private readonly IPEndPoint _destinationEndPoint;
 		private readonly IPEndPoint _localEndPoint;
 		private readonly TcpClient _client;
-		private readonly Stream _stream;
+		private readonly DnsTcpMessageStream _messageStream;
 
 		public TcpClientConnection(TcpClientTransportBase<TTransport> transport, IPEndPoint destinationEndPoint, IPEndPoint localEndPoint, TcpClient client, Stream stream)
 		{
@@ -90,7 +99,7 @@ public abstract class TcpClientTransportBase<TTransport> : PipelinedClientTransp
 			_destinationEndPoint = destinationEndPoint;
 			_localEndPoint = localEndPoint;
 			_client = client;
-			_stream = stream;
+			_messageStream = new DnsTcpMessageStream(stream);
 		}
 
 		public IClientTransport Transport => _transport;
@@ -101,10 +110,18 @@ public abstract class TcpClientTransportBase<TTransport> : PipelinedClientTransp
 			{
 				try
 				{
-					await _stream.WriteAsync(package.ToArraySegment(true), token);
+					// serialized by the message stream, as several queries share the connection
+					await _messageStream.WriteMessageAsync(package.ToArraySegment(true), token).ConfigureAwait(false);
+				}
+				catch (OperationCanceledException) when (token.IsCancellationRequested && !_messageStream.IsDisposed)
+				{
+					// Only this query was aborted, while it waited for the queries of others to be written. The connection,
+					// which the other queries share, stays usable.
+					throw;
 				}
 				catch
 				{
+					MarkFaulty();
 					return false;
 				}
 			}
@@ -114,29 +131,18 @@ public abstract class TcpClientTransportBase<TTransport> : PipelinedClientTransp
 
 		public async Task<DnsReceivedRawPackage?> ReceiveAsync(CancellationToken token = new())
 		{
-			var buffer = new byte[2];
-
 			try
 			{
-				if (!await TryReadAsync(buffer, 0, 2, token))
+				// the timeout of a query is handled by the caller using the token
+				var message = await _messageStream.ReadMessageAsync(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan, token).ConfigureAwait(false);
+
+				if (message == null)
 				{
 					MarkFaulty();
 					return null;
 				}
 
-				var tmp = 0;
-				int length = DnsMessageBase.ParseUShort(buffer, ref tmp);
-
-				buffer = new byte[length + 2];
-				DnsMessageBase.EncodeUShort(buffer, 0, (ushort) length);
-
-				if (!await TryReadAsync(buffer, 2, length, token))
-				{
-					MarkFaulty();
-					return null;
-				}
-
-				return new DnsReceivedRawPackage(buffer, _destinationEndPoint, _localEndPoint);
+				return new DnsReceivedRawPackage(message, _destinationEndPoint, _localEndPoint);
 			}
 			catch
 			{
@@ -145,32 +151,10 @@ public abstract class TcpClientTransportBase<TTransport> : PipelinedClientTransp
 			}
 		}
 
-		private async Task<bool> TryReadAsync(byte[] buffer, int offset, int length, CancellationToken token)
-		{
-			var readBytes = 0;
-
-			while (readBytes < length)
-			{
-				if (token.IsCancellationRequested || !_client.IsConnected())
-					return false;
-
-				try
-				{
-					readBytes += await _stream.ReadAsync(buffer, offset + readBytes, length - readBytes, token);
-				}
-				catch
-				{
-					return false;
-				}
-			}
-
-			return true;
-		}
-
 		public async Task<DnsReceivedRawPackage?> ReceiveAsync(DnsMessageIdentification identification, CancellationToken token)
 		{
 			DnsReceivedRawPackage? package;
-			while ((package = await ReceiveAsync(token)) != null)
+			while ((package = await ReceiveAsync(token).ConfigureAwait(false)) != null)
 			{
 				if (package.MessageIdentification.Equals(identification))
 					return package;
@@ -196,7 +180,7 @@ public abstract class TcpClientTransportBase<TTransport> : PipelinedClientTransp
 		public void Dispose()
 		{
 			MarkFaulty();
-			_stream.TryDispose();
+			_messageStream.Dispose();
 			_client.TryDispose();
 		}
 	}

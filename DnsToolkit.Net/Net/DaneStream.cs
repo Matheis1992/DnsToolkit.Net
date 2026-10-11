@@ -1,5 +1,6 @@
 ﻿#region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
+// Modifications Copyright 2026 Matheis1992
 // 
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
 // 
@@ -144,6 +145,7 @@ namespace DnsToolkit.Net.Net
 		///   A Boolean value that specifies whether the certificate revocation list is
 		///   checked during authentication.
 		/// </param>
+		[Obsolete("Blocks the calling thread while waiting for the DNS responses. Use AuthenticateAsClientAsync instead.")]
 		public void AuthenticateAsClient(string targetHost, int port, ProtocolType protocol = ProtocolType.Tcp, X509CertificateCollection? clientCertificates = null, SslProtocols enabledSslProtocols = DefaultSslProtocols, bool checkCertificateRevocation = false)
 		{
 			_tlsaRecords = _resolver.ResolveSecure<TlsaRecord>(DomainName.Parse("_" + port + "._" + EnumHelper<ProtocolType>.ToString(protocol).ToLowerInvariant() + "." + targetHost), RecordType.Tlsa);
@@ -164,8 +166,8 @@ namespace DnsToolkit.Net.Net
 		/// </param>
 		public async Task AuthenticateAsClientAsync(string targetHost, int port, ProtocolType protocol = ProtocolType.Tcp, X509CertificateCollection? clientCertificates = null, SslProtocols enabledSslProtocols = DefaultSslProtocols, bool checkCertificateRevocation = false)
 		{
-			_tlsaRecords = await _resolver.ResolveSecureAsync<TlsaRecord>(DomainName.Parse("_" + port + "._" + EnumHelper<ProtocolType>.ToString(protocol).ToLowerInvariant() + "." + targetHost), RecordType.Tlsa);
-			await _sslStream.AuthenticateAsClientAsync(targetHost, clientCertificates ?? new X509CertificateCollection(), enabledSslProtocols, checkCertificateRevocation);
+			_tlsaRecords = await _resolver.ResolveSecureAsync<TlsaRecord>(DomainName.Parse("_" + port + "._" + EnumHelper<ProtocolType>.ToString(protocol).ToLowerInvariant() + "." + targetHost), RecordType.Tlsa).ConfigureAwait(false);
+			await _sslStream.AuthenticateAsClientAsync(targetHost, clientCertificates ?? new X509CertificateCollection(), enabledSslProtocols, checkCertificateRevocation).ConfigureAwait(false);
 		}
 
 		/// <summary>

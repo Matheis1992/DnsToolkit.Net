@@ -1,5 +1,6 @@
 ﻿#region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
+// Modifications Copyright 2026 Matheis1992
 // 
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
 // 
@@ -71,7 +72,10 @@ namespace DnsToolkit.Net.Spf
 		/// <returns> true in case of correct prefix </returns>
 		public static bool IsSpfRecord(string s)
 		{
-			return !String.IsNullOrEmpty(s) && s.StartsWith("v=spf1 ");
+			// The version is followed by a space or the end of the record (RFC 7208 section 4.5),
+			// so "v=spf1" alone is a valid record without mechanisms, which results in neutral
+			return !String.IsNullOrEmpty(s)
+			       && (s.Equals("v=spf1", StringComparison.Ordinal) || s.StartsWith("v=spf1 ", StringComparison.Ordinal));
 		}
 
 		/// <summary>
