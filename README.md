@@ -145,6 +145,3 @@ The library is available on Nuget: [https://www.nuget.org/packages/DnsToolkit.Ne
 
 # License
 The library is released under [Apache License 2.0](LICENSE)
-
-# Sponsors
-* [JetBrains](https://www.jetbrains.com/) supports this project with a free license of ReSharper.
