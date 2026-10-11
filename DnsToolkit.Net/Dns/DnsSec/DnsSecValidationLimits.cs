@@ -38,6 +38,12 @@ internal sealed class DnsSecValidationLimits
 	public int MaxDnsKeysPerKeyTag { get; init; } = 2;
 
 	/// <summary>
+	///   The number of DS records of a zone, which are used to find its keys. Every DS record hashes up to
+	///   <see cref="MaxDnsKeysPerKeyTag" /> keys.
+	/// </summary>
+	public int MaxDsRecords { get; init; } = 8;
+
+	/// <summary>
 	///   The number of signature verifications for validating a response. If more are needed, the response is bogus.
 	/// </summary>
 	public int MaxSignatureValidations { get; init; } = 30;
@@ -63,6 +69,8 @@ internal sealed class DnsSecValidationBudget
 	}
 
 	public int MaxDnsKeysPerKeyTag => _limits.MaxDnsKeysPerKeyTag;
+
+	public int MaxDsRecords => _limits.MaxDsRecords;
 
 	/// <exception cref="DnsSecValidationLimitExceededException">The limit of signature verifications is exceeded</exception>
 	public void ConsumeSignatureValidation()

@@ -228,7 +228,7 @@ namespace DnsToolkit.Net.Dns
 			if (validationResult != DnsSecValidationResult.Signed)
 				return validationResult;
 
-			var nsec3Parameter = nsecRecords.Where(x => x.Name.GetParentName().Equals(zoneApex)).Where(x => x.HashAlgorithm.IsSupported()).Select(x => new { x.HashAlgorithm, x.Iterations, x.Salt }).OrderBy(x => x.HashAlgorithm.GetPriority()).FirstOrDefault();
+			var nsec3Parameter = GetNSec3Parameter(nsecRecords.Where(x => x.Name.GetParentName().Equals(zoneApex)).ToList());
 
 			// NSEC3 records with an unknown hash algorithm are ignored, so they prove nothing (RFC 5155, section 8.1)
 			if (nsec3Parameter == null)
@@ -439,7 +439,21 @@ namespace DnsToolkit.Net.Dns
 				if (dsRecords.Any() && !dsRecords.Any(r => r.Algorithm.IsSupported()))
 					return DnsSecValidationResult.Indeterminate;
 
-				return dsRecords.Any(dsRecord => rrSigRecord.Verify(coveredRecords, coveredRecords.Cast<DnsKeyRecord>().Where(dsRecord.IsCovering).ToList(), budget)) ? DnsSecValidationResult.Signed : DnsSecValidationResult.Bogus;
+				// Only a limited number of DS records is used, and for each of them only a limited number of keys with its key tag
+				// is hashed, as key tags collide easily (KeyTrap). The keys of all DS records are verified together, so the
+				// signature is checked once and not once per DS record.
+				var dnsKeys = coveredRecords.Cast<DnsKeyRecord>().ToList();
+				var dsKeys = dsRecords
+					.Where(dsRecord => dsRecord.Algorithm.IsSupported() && dsRecord.DigestType.IsSupported())
+					.Take(budget.MaxDsRecords)
+					.SelectMany(dsRecord => dnsKeys
+						.Where(key => (key.Algorithm == dsRecord.Algorithm) && (key.CalculateKeyTag() == dsRecord.KeyTag))
+						.Take(budget.MaxDnsKeysPerKeyTag)
+						.Where(dsRecord.IsCovering))
+					.Distinct()
+					.ToList();
+
+				return rrSigRecord.Verify(coveredRecords, dsKeys, budget) ? DnsSecValidationResult.Signed : DnsSecValidationResult.Bogus;
 			}
 			else
 			{

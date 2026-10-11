@@ -68,6 +68,38 @@ public class DnsSecValidatorTests
 	}
 
 	[Fact]
+	public async Task KeysOfTheZone_AreSigned_ByTheKeyOfItsDsRecord()
+	{
+		Assert.Equal(DnsSecValidationResult.Signed, await ValidateKeysAsync(new[] { new DsRecord(_key, 3600, DnsSecDigestType.Sha256) }));
+	}
+
+	[Fact]
+	public async Task DsRecordsBeyondTheLimit_AreNotUsed()
+	{
+		// DS records with the key tag of the key, but a wrong digest. Before, every DS record hashed every key with its key tag,
+		// which the budget did not count (KeyTrap).
+		var limit = DnsSecValidationLimits.Default.MaxDsRecords;
+		var wrong = Enumerable.Range(0, limit).Select(i => new DsRecord(_zone, RecordClass.INet, 3600, _key.CalculateKeyTag(), _key.Algorithm, DnsSecDigestType.Sha256, Enumerable.Repeat((byte) i, 32).ToArray())).ToList();
+		var right = new DsRecord(_key, 3600, DnsSecDigestType.Sha256);
+
+		Assert.Equal(DnsSecValidationResult.Signed, await ValidateKeysAsync(wrong.Take(limit - 1).Append(right).ToList()));
+		Assert.Equal(DnsSecValidationResult.Bogus, await ValidateKeysAsync(wrong.Append(right).ToList()));
+	}
+
+	/// <summary>
+	///   Validates the DNSKEY records of the zone, which are signed by the key and whose DS records are the given ones
+	/// </summary>
+	private static Task<DnsSecValidationResult> ValidateKeysAsync(IReadOnlyList<DsRecord> dsRecords)
+	{
+		var message = new DnsMessage();
+		message.AnswerRecords.Add(_key);
+		message.AnswerRecords.Add(Sign(_key));
+
+		return new DnsSecValidator<object?>(new KeyResolver(new[] { _key }, dsRecords: dsRecords), new EmptyHintStore())
+			.ValidateAsync(_zone, RecordType.DnsKey, RecordClass.INet, message, new List<DnsKeyRecord> { _key }, null, default);
+	}
+
+	[Fact]
 	public async Task OnlyTwoKeysWithTheSameKeyTag_AreTried()
 	{
 		var (message, records) = SignedAnswer();
@@ -504,11 +536,13 @@ public class DnsSecValidatorTests
 	{
 		private readonly IReadOnlyList<DnsKeyRecord> _keys;
 		private readonly Dictionary<DomainName, DnsMessage>? _dsResponses;
+		private readonly IReadOnlyList<DsRecord>? _dsRecords;
 
-		public KeyResolver(IReadOnlyList<DnsKeyRecord> keys, Dictionary<DomainName, DnsMessage>? dsResponses = null)
+		public KeyResolver(IReadOnlyList<DnsKeyRecord> keys, Dictionary<DomainName, DnsMessage>? dsResponses = null, IReadOnlyList<DsRecord>? dsRecords = null)
 		{
 			_keys = keys;
 			_dsResponses = dsResponses;
+			_dsRecords = dsRecords;
 		}
 
 		public Task<DnsMessage?> ResolveMessageAsync(DomainName name, RecordType recordType, RecordClass recordClass, object? state, CancellationToken token)
@@ -522,7 +556,13 @@ public class DnsSecValidatorTests
 		public Task<DnsSecResult<TRecord>> ResolveSecureAsync<TRecord>(DomainName name, RecordType recordType, RecordClass recordClass, object? state, CancellationToken token)
 			where TRecord : DnsRecordBase
 		{
-			if ((recordType != RecordType.DnsKey) || !name.Equals(_zone))
+			if (!name.Equals(_zone))
+				throw new NotSupportedException();
+
+			if ((recordType == RecordType.Ds) && (_dsRecords != null))
+				return Task.FromResult(new DnsSecResult<TRecord>(_dsRecords.Cast<TRecord>().ToList(), DnsSecValidationResult.Signed));
+
+			if (recordType != RecordType.DnsKey)
 				throw new NotSupportedException();
 
 			return Task.FromResult(new DnsSecResult<TRecord>(_keys.Cast<TRecord>().ToList(), DnsSecValidationResult.Signed));
