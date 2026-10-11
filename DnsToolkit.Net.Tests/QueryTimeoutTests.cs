@@ -122,6 +122,38 @@ public class QueryTimeoutTests
 	}
 
 	[Fact]
+	public async Task CallerCancellation_WhileWaitingForTheWriteOfAnotherQuery_DoesNotMarkConnectionFaulty()
+	{
+		// The queries share the pooled TCP connection. The write of the first one blocks like on a full send buffer, until
+		// the second query was canceled, while it waited for its turn to write.
+		using var server = new LocalDnsServer(new[] { new ARecord(_name, 60, IPAddress.Parse("192.0.2.1")) });
+		var transport = new GatedWriteTransport(server.Port);
+		using var client = new DnsClient(new[] { IPAddress.Loopback }, new IClientTransport[] { transport }, true, 10000);
+
+		var first = client.ResolveAsync(_name);
+		await transport.FirstWriteStarted;
+
+		using (var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200)))
+		{
+			try
+			{
+				Assert.Null(await client.ResolveAsync(_name, token: cts.Token));
+			}
+			catch (OperationCanceledException)
+			{
+				// expected as well
+			}
+		}
+
+		transport.ReleaseWrites();
+		Assert.NotNull(await first);
+
+		// before, the canceled query marked the shared connection faulty, so the next query opened a new one
+		Assert.NotNull(await client.ResolveAsync(_name));
+		Assert.Equal(2, transport.Streams[0].WriteCount);
+	}
+
+	[Fact]
 	public async Task HangingStreamSetup_IsLimitedByQueryTimeout_AndClosesTheConnection()
 	{
 		// Stands in for a TLS server which accepts the connection, but never answers the handshake.
@@ -252,6 +284,88 @@ public class QueryTimeoutTests
 		public void MarkFaulty() => IsFaulty = true;
 
 		public void Dispose() { }
+	}
+
+	/// <summary>
+	///   A TCP transport, whose writes wait until they are released
+	/// </summary>
+	private sealed class GatedWriteTransport : TcpClientTransportBase<GatedWriteTransport>
+	{
+		private readonly TaskCompletionSource<bool> _firstWriteStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+		private readonly TaskCompletionSource<bool> _writesReleased = new(TaskCreationOptions.RunContinuationsAsynchronously);
+		private readonly List<GatedWriteStream> _streams = new();
+
+		public GatedWriteTransport(int port)
+			: base(port) { }
+
+		public Task FirstWriteStarted => _firstWriteStarted.Task;
+
+		public IReadOnlyList<GatedWriteStream> Streams
+		{
+			get
+			{
+				lock (_streams)
+					return _streams.ToList();
+			}
+		}
+
+		public void ReleaseWrites() => _writesReleased.TrySetResult(true);
+
+		protected override Task<Stream?> GetStreamAsync(TcpClient client, CancellationToken token)
+		{
+			var stream = new GatedWriteStream(client.GetStream(), this);
+
+			lock (_streams)
+				_streams.Add(stream);
+
+			return Task.FromResult<Stream?>(stream);
+		}
+
+		public sealed class GatedWriteStream : Stream
+		{
+			private readonly Stream _inner;
+			private readonly GatedWriteTransport _transport;
+			private int _writeCount;
+
+			public GatedWriteStream(Stream inner, GatedWriteTransport transport)
+			{
+				_inner = inner;
+				_transport = transport;
+			}
+
+			public int WriteCount => Volatile.Read(ref _writeCount);
+
+			public override async Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+			{
+				Interlocked.Increment(ref _writeCount);
+				_transport._firstWriteStarted.TrySetResult(true);
+
+				// like a socket with a full send buffer, it ignores the cancellation token
+				await _transport._writesReleased.Task;
+				await _inner.WriteAsync(buffer, offset, count, cancellationToken);
+			}
+
+			public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) => _inner.ReadAsync(buffer, offset, count, cancellationToken);
+			public override int Read(byte[] buffer, int offset, int count) => _inner.Read(buffer, offset, count);
+			public override void Write(byte[] buffer, int offset, int count) => WriteAsync(buffer, offset, count, default).GetAwaiter().GetResult();
+			public override Task FlushAsync(CancellationToken cancellationToken) => _inner.FlushAsync(cancellationToken);
+			public override void Flush() => _inner.Flush();
+
+			protected override void Dispose(bool disposing)
+			{
+				if (disposing)
+					_inner.Dispose();
+				base.Dispose(disposing);
+			}
+
+			public override bool CanRead => true;
+			public override bool CanSeek => false;
+			public override bool CanWrite => true;
+			public override long Length => throw new NotSupportedException();
+			public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+			public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+			public override void SetLength(long value) => throw new NotSupportedException();
+		}
 	}
 
 	/// <summary>

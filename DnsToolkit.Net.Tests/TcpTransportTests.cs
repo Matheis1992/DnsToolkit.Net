@@ -44,6 +44,48 @@ public class TcpTransportTests
 	}
 
 	[Fact]
+	public async Task TransportBoundToIPv6Any_AcceptsIPv4_AlsoAfterARestart()
+	{
+		if (!Socket.OSSupportsIPv6)
+			return;
+
+		var port = LocalDnsServer.GetFreePort();
+		var transport = new TcpServerTransport(new IPEndPoint(IPAddress.IPv6Any, port));
+		try
+		{
+			transport.Bind();
+			transport.Close();
+
+			// before, the socket of the restarted listener accepted only IPv6
+			transport.Bind();
+
+			using var client = new TcpClient(AddressFamily.InterNetwork);
+			await client.ConnectAsync(IPAddress.Loopback, port);
+			Assert.True(client.Connected);
+		}
+		finally
+		{
+			transport.Dispose();
+		}
+	}
+
+	[Fact]
+	public async Task Server_SendsResponseOfASlowQuery_AfterTheKeepAliveEnded()
+	{
+		// the keep alive ends, while the query is processed, but the response is still sent before the connection is closed
+		using var server = new LocalDnsServer(new DnsRecordBase[] { new ARecord(_name, 60, _address) }, tcpKeepAlive: 500, answerDelay: TimeSpan.FromMilliseconds(1500));
+		using var client = new TcpClient();
+		await client.ConnectAsync(IPAddress.Loopback, server.Port);
+		var stream = client.GetStream();
+
+		var query = Query(0x1111);
+		await stream.WriteAsync(query, 0, query.Length);
+
+		Assert.Equal(0x1111, (await ReadResponseAsync(stream)).TransactionID);
+		Assert.True(await TransportTests.WaitForRemoteCloseAsync(client, TimeSpan.FromSeconds(10)), "The idle connection was not closed after the response");
+	}
+
+	[Fact]
 	public async Task Server_ClosesConnectionWithIncompleteQuery_AfterTimeout()
 	{
 		// the keep alive is long, so only the timeout for the rest of a started query can close the connection

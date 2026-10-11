@@ -113,8 +113,15 @@ public abstract class TcpClientTransportBase<TTransport> : PipelinedClientTransp
 					// serialized by the message stream, as several queries share the connection
 					await _messageStream.WriteMessageAsync(package.ToArraySegment(true), token).ConfigureAwait(false);
 				}
+				catch (OperationCanceledException) when (token.IsCancellationRequested && !_messageStream.IsDisposed)
+				{
+					// Only this query was aborted, while it waited for the queries of others to be written. The connection,
+					// which the other queries share, stays usable.
+					throw;
+				}
 				catch
 				{
+					MarkFaulty();
 					return false;
 				}
 			}

@@ -45,17 +45,24 @@ internal sealed class DnsTcpMessageStream : IDisposable
 	/// <param name="firstByteTimeout">The time to wait for the start of the message, e.g. the keep alive of an idle connection</param>
 	/// <param name="messageTimeout">The time to receive the rest of the message, after it started</param>
 	/// <param name="token">The token to monitor cancellation requests</param>
-	/// <returns>The message including the length header, or null if the stream ended</returns>
+	/// <returns>
+	///   The message including the length header, or null if the stream ended or no message started within the first byte
+	///   timeout. After the first byte timeout, the stream stays open for writing, e.g. the responses to the queries in
+	///   progress, but must not be read anymore.
+	/// </returns>
 	/// <exception cref="OperationCanceledException">
-	///   On timeout or cancellation. The stream is closed then, as a partially read message cannot be continued.
+	///   On the message timeout or cancellation. The stream is closed then, as a partially read message cannot be continued.
 	/// </exception>
 	public async Task<byte[]?> ReadMessageAsync(TimeSpan firstByteTimeout, TimeSpan messageTimeout, CancellationToken token)
 	{
 		using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(token);
-		timeoutCts.CancelAfter(firstByteTimeout);
 
 		// Not all streams observe the token (e.g. NetworkStream on .NET Framework), closing the stream aborts the read in any case
 		using var registration = timeoutCts.Token.Register(Dispose);
+
+		// The first byte timeout does not cancel the read, as canceling closes the stream
+		using var firstByteTimeoutCts = new CancellationTokenSource();
+		var firstByteTimeoutTask = firstByteTimeout == Timeout.InfiniteTimeSpan ? null : Task.Delay(firstByteTimeout, firstByteTimeoutCts.Token);
 
 		var isMessageStarted = false;
 
@@ -63,7 +70,26 @@ internal sealed class DnsTcpMessageStream : IDisposable
 		{
 			while (true)
 			{
-				var result = await _reader.ReadAsync(timeoutCts.Token).ConfigureAwait(false);
+				var read = _reader.ReadAsync(timeoutCts.Token);
+
+				ReadResult result;
+				if (!isMessageStarted && (firstByteTimeoutTask != null) && !read.IsCompleted)
+				{
+					var readTask = read.AsTask();
+					if (await Task.WhenAny(readTask, firstByteTimeoutTask).ConfigureAwait(false) == firstByteTimeoutTask)
+					{
+						// The read ends, when the stream is disposed
+						_ = readTask.ContinueWith(t => t.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+						return null;
+					}
+
+					result = await readTask.ConfigureAwait(false);
+				}
+				else
+				{
+					result = await read.ConfigureAwait(false);
+				}
+
 				var buffer = result.Buffer;
 
 				if (TryReadMessage(ref buffer, out var message))
@@ -94,6 +120,10 @@ internal sealed class DnsTcpMessageStream : IDisposable
 			// the stream was closed by the timeout or cancellation, which may result in other exceptions than OperationCanceledException
 			throw new OperationCanceledException(timeoutCts.Token);
 		}
+		finally
+		{
+			firstByteTimeoutCts.Cancel();
+		}
 	}
 
 	/// <summary>
@@ -101,6 +131,10 @@ internal sealed class DnsTcpMessageStream : IDisposable
 	/// </summary>
 	/// <param name="messageWithLengthHeader">The message including the length header</param>
 	/// <param name="token">The token to monitor cancellation requests</param>
+	/// <exception cref="OperationCanceledException">
+	///   On cancellation. If the message was canceled while it waited for the other messages, the stream stays usable.
+	///   Otherwise it is closed like on any other error of the write, as a partially written message corrupts the stream.
+	/// </exception>
 	public async Task WriteMessageAsync(ArraySegment<byte> messageWithLengthHeader, CancellationToken token)
 	{
 		await _writeLock.WaitAsync(token).ConfigureAwait(false);
@@ -108,6 +142,11 @@ internal sealed class DnsTcpMessageStream : IDisposable
 		{
 			await _stream.WriteAsync(messageWithLengthHeader.Array!, messageWithLengthHeader.Offset, messageWithLengthHeader.Count, token).ConfigureAwait(false);
 			await _stream.FlushAsync(token).ConfigureAwait(false);
+		}
+		catch
+		{
+			Dispose();
+			throw;
 		}
 		finally
 		{
@@ -133,6 +172,8 @@ internal sealed class DnsTcpMessageStream : IDisposable
 		buffer = buffer.Slice(messageLength);
 		return true;
 	}
+
+	public bool IsDisposed => Volatile.Read(ref _isDisposed) == 1;
 
 	/// <summary>
 	///   Closes the stream, which also aborts a pending read

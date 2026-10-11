@@ -280,6 +280,35 @@ public class DnsServerTests
 	}
 
 	[Fact]
+	public async Task Stop_ClosesTheOtherTransports_WhenClosingOneFails()
+	{
+		var failing = new FakeServerTransport(throwOnClose: true);
+		var other = new FakeServerTransport();
+		var server = new DnsServer(failing, other);
+		var exceptions = new List<Exception>();
+		server.ExceptionThrown += (_, e) =>
+		{
+			lock (exceptions)
+				exceptions.Add(e.Exception);
+			return Task.CompletedTask;
+		};
+		server.Start();
+
+		// before, the exception ended the stop, so the other transport stayed bound and the server could not be started again
+		await CompletesWithinAsync(server.StopAsync(), TimeSpan.FromSeconds(5));
+
+		Assert.Equal(1, other.CloseCalls);
+		lock (exceptions)
+			Assert.Contains(exceptions, e => e is InvalidOperationException);
+
+		server.Start();
+		await CompletesWithinAsync(server.StopAsync(), TimeSpan.FromSeconds(5));
+		Assert.Equal(2, other.CloseCalls);
+
+		((IDisposable) server).Dispose();
+	}
+
+	[Fact]
 	public void Stop_ClosesAllTransportsSynchronously()
 	{
 		var asyncClosable = new AsyncFakeServerTransport();
@@ -789,14 +818,16 @@ public class DnsServerTests
 
 		private int _remainingFailedAccepts;
 		private readonly bool _throwOnBind;
+		private readonly bool _throwOnClose;
 
-		public FakeServerTransport(FakeServerConnection? connection = null, bool alwaysReturnNull = false, bool throwOnFirstAccept = false, int failedAcceptsBeforeConnection = 0, bool throwOnBind = false)
+		public FakeServerTransport(FakeServerConnection? connection = null, bool alwaysReturnNull = false, bool throwOnFirstAccept = false, int failedAcceptsBeforeConnection = 0, bool throwOnBind = false, bool throwOnClose = false)
 		{
 			_connection = connection;
 			_alwaysReturnNull = alwaysReturnNull;
 			_throwOnNextAccept = throwOnFirstAccept;
 			_remainingFailedAccepts = failedAcceptsBeforeConnection;
 			_throwOnBind = throwOnBind;
+			_throwOnClose = throwOnClose;
 		}
 
 		public int AcceptCalls => Volatile.Read(ref _acceptCalls);
@@ -820,7 +851,13 @@ public class DnsServerTests
 				throw new SocketException((int) SocketError.AddressAlreadyInUse);
 		}
 
-		public void Close() => Interlocked.Increment(ref _closeCalls);
+		public void Close()
+		{
+			Interlocked.Increment(ref _closeCalls);
+
+			if (_throwOnClose)
+				throw new InvalidOperationException("Closing failed");
+		}
 
 		public async Task<IServerConnection?> AcceptConnectionAsync(CancellationToken token = default)
 		{

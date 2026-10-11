@@ -59,17 +59,19 @@ public class DnsTcpMessageStreamTests
 	}
 
 	[Fact]
-	public async Task FirstByteTimeout_ClosesStream()
+	public async Task FirstByteTimeout_ReturnsNull_AndKeepsStreamOpen()
 	{
 		// a connection on which the client never sends anything
 		using var stream = new ScriptedReadStream(Array.Empty<byte>(), chunkSize: 1, blockAtEnd: true);
 		using var messageStream = new DnsTcpMessageStream(stream);
 
 		var stopwatch = Stopwatch.StartNew();
-		await Assert.ThrowsAnyAsync<OperationCanceledException>(() => messageStream.ReadMessageAsync(TimeSpan.FromMilliseconds(200), _infinite, default));
+		Assert.Null(await messageStream.ReadMessageAsync(TimeSpan.FromMilliseconds(200), _infinite, default));
 
 		Assert.InRange(stopwatch.Elapsed, TimeSpan.FromMilliseconds(150), TimeSpan.FromSeconds(3));
-		Assert.True(stream.IsDisposed);
+
+		// the responses to the queries in progress can still be written, before the stream is closed
+		Assert.False(stream.IsDisposed);
 	}
 
 	[Fact]
@@ -129,6 +131,41 @@ public class DnsTcpMessageStreamTests
 
 		Assert.Equal(messages.Count, received.Count);
 		Assert.All(received, m => Assert.Contains(messages, expected => expected.SequenceEqual(m)));
+	}
+
+	[Fact]
+	public async Task CancellationWhileWaitingForAnotherWrite_KeepsStreamUsable()
+	{
+		using var stream = new BlockingWriteStream();
+		using var messageStream = new DnsTcpMessageStream(stream);
+
+		var first = messageStream.WriteMessageAsync(new ArraySegment<byte>(Message(1, 10)), default);
+		await stream.WriteStarted;
+
+		using (var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(100)))
+			await Assert.ThrowsAnyAsync<OperationCanceledException>(() => messageStream.WriteMessageAsync(new ArraySegment<byte>(Message(2, 10)), cts.Token));
+
+		// nothing of the canceled message was written, so the stream stays usable
+		stream.Release();
+		await first;
+		await messageStream.WriteMessageAsync(new ArraySegment<byte>(Message(3, 10)), default);
+
+		Assert.False(messageStream.IsDisposed);
+		Assert.Equal(Message(1, 10).Concat(Message(3, 10)), stream.GetWrittenData());
+	}
+
+	[Fact]
+	public async Task CancellationDuringTheWrite_ClosesStream()
+	{
+		using var stream = new BlockingWriteStream();
+		using var messageStream = new DnsTcpMessageStream(stream);
+		using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+
+		await Assert.ThrowsAnyAsync<OperationCanceledException>(() => messageStream.WriteMessageAsync(new ArraySegment<byte>(Message(1, 10)), cts.Token));
+
+		// a partially written message would corrupt the stream for the following messages
+		Assert.True(messageStream.IsDisposed);
+		Assert.True(stream.IsDisposed);
 	}
 
 	/// <summary>
@@ -209,6 +246,60 @@ public class DnsTcpMessageStreamTests
 		public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
 		public override void SetLength(long value) => throw new NotSupportedException();
 		public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+	}
+
+	/// <summary>
+	///   Blocks the writes like a socket with a full send buffer, until they are released or canceled, and records the written data
+	/// </summary>
+	private sealed class BlockingWriteStream : Stream
+	{
+		private readonly TaskCompletionSource<bool> _writeStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+		private readonly TaskCompletionSource<bool> _released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+		private readonly MemoryStream _written = new();
+
+		public Task WriteStarted => _writeStarted.Task;
+
+		public bool IsDisposed { get; private set; }
+
+		public void Release() => _released.TrySetResult(true);
+
+		public byte[] GetWrittenData()
+		{
+			lock (_written)
+				return _written.ToArray();
+		}
+
+		public override async Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+		{
+			_writeStarted.TrySetResult(true);
+
+			var canceled = Task.Delay(Timeout.Infinite, cancellationToken);
+			if (await Task.WhenAny(_released.Task, canceled) == canceled)
+				await canceled;
+
+			lock (_written)
+				_written.Write(buffer, offset, count);
+		}
+
+		public override void Write(byte[] buffer, int offset, int count) => WriteAsync(buffer, offset, count, default).GetAwaiter().GetResult();
+
+		public override Task FlushAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+		protected override void Dispose(bool disposing)
+		{
+			IsDisposed = true;
+			base.Dispose(disposing);
+		}
+
+		public override bool CanRead => false;
+		public override bool CanSeek => false;
+		public override bool CanWrite => true;
+		public override long Length => throw new NotSupportedException();
+		public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+		public override void Flush() { }
+		public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+		public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+		public override void SetLength(long value) => throw new NotSupportedException();
 	}
 
 	/// <summary>

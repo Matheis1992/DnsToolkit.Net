@@ -39,6 +39,7 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 	/// </summary>
 	public int KeepAlive { get; }
 
+	private readonly IPEndPoint _bindEndPoint;
 	private readonly TcpListener _tcpListener;
 
 	/// <summary>
@@ -65,9 +66,8 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 	{
 		Timeout = timeout;
 		KeepAlive = keepAlive;
+		_bindEndPoint = bindEndPoint;
 		_tcpListener = new TcpListener(bindEndPoint);
-		if (bindEndPoint.Address.Equals(IPAddress.IPv6Any))
-			_tcpListener.Server.DualMode = true;
 	}
 
 	/// <summary>
@@ -75,6 +75,10 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 	/// </summary>
 	public void Bind()
 	{
+		// Stopping the listener replaces its socket, so dual mode is set for every start, also after a restart of the server
+		if (_bindEndPoint.Address.Equals(IPAddress.IPv6Any))
+			_tcpListener.Server.DualMode = true;
+
 		_tcpListener.Start();
 	}
 
@@ -203,9 +207,9 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 				var remoteEndPoint = RemoteEndPoint;
 				var localEndPoint = LocalEndPoint;
 
-				// Wait up to the keep alive for the next query, and up to the timeout for the rest of it.
-				// The read itself is not canceled by the token, as canceling closes the stream, but the responses
-				// to the queries in progress still have to be sent when the server stops.
+				// Wait up to the keep alive for the next query, and up to the timeout for the rest of it. Neither the keep
+				// alive nor the token cancel the read itself, as canceling closes the stream, but the responses to the queries
+				// in progress still have to be sent, before the connection is closed.
 				var read = _messageStream.ReadMessageAsync(
 					DnsTcpMessageStream.ToTimeout(TransportInternal.KeepAlive),
 					DnsTcpMessageStream.ToTimeout(TransportInternal.Timeout),

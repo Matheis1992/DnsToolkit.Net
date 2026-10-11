@@ -303,15 +303,28 @@ namespace DnsToolkit.Net.Dns
 
 		private async Task CloseTransportsAsync(bool isAsync, CancellationToken token)
 		{
+			// Every transport is closed, even if closing another one failed. Otherwise, the remaining transports would keep
+			// their ports, so the server could not be started again.
 			foreach (var transport in _transports)
 			{
-				if (isAsync && (transport is IAsyncClosableServerTransport asyncTransport))
+				try
 				{
-					await asyncTransport.CloseAsync(token).ConfigureAwait(false);
+					if (isAsync && (transport is IAsyncClosableServerTransport asyncTransport))
+					{
+						await asyncTransport.CloseAsync(token).ConfigureAwait(false);
+					}
+					else
+					{
+						transport.Close();
+					}
 				}
-				else
+				catch (OperationCanceledException) when (token.IsCancellationRequested)
 				{
-					transport.Close();
+					// the stop was aborted, so the transport was closed without waiting for its requests in progress
+				}
+				catch (Exception ex)
+				{
+					OnExceptionThrownAsync(ex);
 				}
 			}
 		}

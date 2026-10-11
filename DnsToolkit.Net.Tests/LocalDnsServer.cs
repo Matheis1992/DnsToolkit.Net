@@ -31,6 +31,7 @@ internal sealed class LocalDnsServer : IDisposable
 {
 	private DnsServer _server = null!;
 	private readonly List<DnsRecordBase> _records;
+	private readonly TimeSpan _answerDelay;
 
 	public int Port { get; private set; }
 	public int TlsPort { get; private set; }
@@ -41,9 +42,10 @@ internal sealed class LocalDnsServer : IDisposable
 
 	public static X509Certificate2 SharedCertificate => _certificate.Value;
 
-	public LocalDnsServer(IEnumerable<DnsRecordBase> records, int tlsHandshakeTimeout = 5000, int tcpTimeout = 5000, int tcpKeepAlive = 120000, int maxConcurrentConnectionsPerTransport = 1000)
+	public LocalDnsServer(IEnumerable<DnsRecordBase> records, int tlsHandshakeTimeout = 5000, int tcpTimeout = 5000, int tcpKeepAlive = 120000, int maxConcurrentConnectionsPerTransport = 1000, TimeSpan answerDelay = default)
 	{
 		_records = records.ToList();
+		_answerDelay = answerDelay;
 
 		// A free port may be taken by another test (process) before the server binds it, so retry with other ports
 		for (var attempt = 1;; attempt++)
@@ -72,8 +74,12 @@ internal sealed class LocalDnsServer : IDisposable
 		}
 	}
 
-	private Task AnswerQuery(object sender, QueryReceivedEventArgs e)
+	private async Task AnswerQuery(object sender, QueryReceivedEventArgs e)
 	{
+		// like a handler, which waits for an upstream server
+		if (_answerDelay > TimeSpan.Zero)
+			await Task.Delay(_answerDelay);
+
 		var query = (DnsMessage) e.Query;
 		var question = query.Questions[0];
 		var response = query.CreateResponseInstance();
@@ -87,7 +93,6 @@ internal sealed class LocalDnsServer : IDisposable
 		response.ReturnCode = answers.Count > 0 || _records.Any(r => r.Name.Equals(question.Name)) ? ReturnCode.NoError : ReturnCode.NxDomain;
 
 		e.Response = response;
-		return Task.CompletedTask;
 	}
 
 	public DnsClient CreateClient(IClientTransport transport, int queryTimeout = 5000)
