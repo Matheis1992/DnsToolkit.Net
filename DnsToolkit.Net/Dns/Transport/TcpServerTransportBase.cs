@@ -149,10 +149,16 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 	/// <summary>
 	///   The connection which is used to the server using TCP communication
 	/// </summary>
-	protected abstract class TcpServerConnectionBase : IServerConnection
+	protected abstract class TcpServerConnectionBase : IServerConnection, IKeepAliveServerConnection
 	{
 		protected readonly TTransport TransportInternal;
 		private DnsTcpMessageStream? _messageStream;
+
+		// Canceled once the keep alive expired, then no further queries are read. The keep alive only runs while no query is
+		// in progress, so it does not end the connection, while responses are still produced (RFC 7766, section 6.2.3).
+		private readonly CancellationTokenSource _idleCts = new();
+		private readonly object _queriesLock = new();
+		private int _queriesInProgress;
 
 		protected TcpClient Client { get; }
 
@@ -189,7 +195,30 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 				return false;
 
 			_messageStream = new DnsTcpMessageStream(stream);
+
+			lock (_queriesLock)
+				_idleCts.CancelAfter(TaskExtensions.ToTimeout(TransportInternal.KeepAlive));
+
 			return true;
+		}
+
+		private void OnQueryReceived()
+		{
+			lock (_queriesLock)
+			{
+				if (_queriesInProgress++ == 0)
+					_idleCts.CancelAfter(System.Threading.Timeout.InfiniteTimeSpan);
+			}
+		}
+
+		void IKeepAliveServerConnection.OnQueryFinished()
+		{
+			// CancelAfter cancels by a timer, also with a delay of 0, so nothing runs inside of the lock
+			lock (_queriesLock)
+			{
+				if (--_queriesInProgress == 0)
+					_idleCts.CancelAfter(TaskExtensions.ToTimeout(TransportInternal.KeepAlive));
+			}
 		}
 
 		/// <summary>
@@ -207,11 +236,12 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 				var remoteEndPoint = RemoteEndPoint;
 				var localEndPoint = LocalEndPoint;
 
-				// Wait up to the keep alive for the next query, and up to the timeout for the rest of it. Neither the keep
+				// Wait for the next query until the keep alive expired, and up to the timeout for the rest of it. Neither the keep
 				// alive nor the token cancel the read itself, as canceling closes the stream, but the responses to the queries
 				// in progress still have to be sent, before the connection is closed.
 				var read = _messageStream.ReadMessageAsync(
-					TaskExtensions.ToTimeout(TransportInternal.KeepAlive),
+					System.Threading.Timeout.InfiniteTimeSpan,
+					_idleCts.Token,
 					TaskExtensions.ToTimeout(TransportInternal.Timeout),
 					CancellationToken.None);
 
@@ -228,7 +258,12 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 					return null;
 				}
 
-				return message == null ? null : new DnsReceivedRawPackage(message, remoteEndPoint, localEndPoint);
+				if (message == null)
+					return null;
+
+				// counted here, so the keep alive cannot expire between receiving the query and processing it
+				OnQueryReceived();
+				return new DnsReceivedRawPackage(message, remoteEndPoint, localEndPoint);
 			}
 			catch
 			{
@@ -272,6 +307,9 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 
 		public void Dispose()
 		{
+			// Stops the timer of the keep alive. The source is not disposed, as the server may still report finished queries.
+			_idleCts.Cancel();
+
 			_messageStream?.Dispose();
 			Client.TryDispose();
 		}

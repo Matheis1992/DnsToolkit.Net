@@ -744,6 +744,9 @@ namespace DnsToolkit.Net.Dns
 			}
 			finally
 			{
+				// e.g. the keep alive of a TCP connection starts, once its last query is finished
+				(connection as IKeepAliveServerConnection)?.OnQueryFinished();
+
 				querySlots.Release();
 				refCount.Decrement();
 			}

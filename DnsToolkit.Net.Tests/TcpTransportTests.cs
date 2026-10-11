@@ -69,12 +69,9 @@ public class TcpTransportTests
 		Assert.Equal(0x4242, (await response).TransactionID);
 	}
 
-	[Fact]
+	[IPv6Fact]
 	public async Task TransportBoundToIPv6Any_AcceptsIPv4_AlsoAfterARestart()
 	{
-		if (!Socket.OSSupportsIPv6)
-			return;
-
 		var port = LocalDnsServer.GetFreePort();
 		var transport = new TcpServerTransport(new IPEndPoint(IPAddress.IPv6Any, port));
 		try
@@ -109,6 +106,29 @@ public class TcpTransportTests
 
 		Assert.Equal(0x1111, (await ReadResponseAsync(stream)).TransactionID);
 		Assert.True(await TransportTests.WaitForRemoteCloseAsync(client, TimeSpan.FromSeconds(10)), "The idle connection was not closed after the response");
+	}
+
+	[Fact]
+	public async Task Server_ReadsFurtherQueries_AfterTheKeepAlive_WhileAQueryIsInProgress()
+	{
+		// the keep alive only runs while no query is in progress (RFC 7766, section 6.2.3)
+		using var server = new LocalDnsServer(new DnsRecordBase[] { new ARecord(_name, 60, _address) }, tcpKeepAlive: 500, answerDelay: TimeSpan.FromMilliseconds(1500));
+		using var client = new TcpClient();
+		await client.ConnectAsync(IPAddress.Loopback, server.Port);
+		var stream = client.GetStream();
+
+		var first = Query(0x1111);
+		await stream.WriteAsync(first, 0, first.Length);
+
+		// longer than the keep alive, but shorter than the processing of the first query. Before, the server stopped reading here.
+		await Task.Delay(1000);
+		var second = Query(0x2222);
+		await stream.WriteAsync(second, 0, second.Length);
+
+		var ids = new[] { (await ReadResponseAsync(stream)).TransactionID, (await ReadResponseAsync(stream)).TransactionID };
+		Assert.Equal(new ushort[] { 0x1111, 0x2222 }, ids.OrderBy(x => x));
+
+		Assert.True(await TransportTests.WaitForRemoteCloseAsync(client, TimeSpan.FromSeconds(10)), "The idle connection was not closed after the responses");
 	}
 
 	[Fact]

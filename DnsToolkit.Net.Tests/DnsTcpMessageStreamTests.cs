@@ -72,6 +72,32 @@ public class DnsTcpMessageStreamTests
 
 		// the responses to the queries in progress can still be written, before the stream is closed
 		Assert.False(stream.IsDisposed);
+
+		// the abandoned read is still pending, before a second read failed with an exception of the pipe reader
+		await Assert.ThrowsAsync<InvalidOperationException>(() => messageStream.ReadMessageAsync(_infinite, _infinite, default));
+	}
+
+	[Fact]
+	public async Task IdleToken_EndsTheWaitForTheNextMessage_LikeTheFirstByteTimeout()
+	{
+		using var stream = new ScriptedReadStream(Array.Empty<byte>(), chunkSize: 1, blockAtEnd: true);
+		using var messageStream = new DnsTcpMessageStream(stream);
+		using var idleCts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+
+		Assert.Null(await messageStream.ReadMessageAsync(_infinite, idleCts.Token, _infinite, default));
+		Assert.False(stream.IsDisposed);
+	}
+
+	[Fact]
+	public async Task IdleToken_DoesNotLimitMessageOnceStarted()
+	{
+		// the message starts immediately, but takes about 700 ms in total
+		var message = Message(1, 5);
+		using var stream = new ScriptedReadStream(message, chunkSize: 1, chunkDelay: TimeSpan.FromMilliseconds(100));
+		using var messageStream = new DnsTcpMessageStream(stream);
+		using var idleCts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
+
+		Assert.Equal(message, await messageStream.ReadMessageAsync(_infinite, idleCts.Token, TimeSpan.FromSeconds(5), default));
 	}
 
 	[Fact]

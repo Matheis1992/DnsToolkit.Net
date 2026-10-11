@@ -33,6 +33,9 @@ internal sealed class DnsTcpMessageStream : IDisposable
 	private readonly SemaphoreSlim _writeLock = new(1, 1);
 	private int _isDisposed;
 
+	// the wait for a message ended by the first byte timeout, but its read is still pending
+	private int _isReadAbandoned;
+
 	public DnsTcpMessageStream(Stream stream)
 	{
 		_stream = stream;
@@ -42,27 +45,60 @@ internal sealed class DnsTcpMessageStream : IDisposable
 	/// <summary>
 	///   Reads the next message
 	/// </summary>
-	/// <param name="firstByteTimeout">The time to wait for the start of the message, e.g. the keep alive of an idle connection</param>
+	/// <param name="firstByteTimeout">The time to wait for the start of the message</param>
 	/// <param name="messageTimeout">The time to receive the rest of the message, after it started</param>
 	/// <param name="token">The token to monitor cancellation requests</param>
 	/// <returns>
 	///   The message including the length header, or null if the stream ended or no message started within the first byte
 	///   timeout. After the first byte timeout, the stream stays open for writing, e.g. the responses to the queries in
-	///   progress, but must not be read anymore.
+	///   progress, but cannot be read anymore.
 	/// </returns>
 	/// <exception cref="OperationCanceledException">
 	///   On the message timeout or cancellation. The stream is closed then, as a partially read message cannot be continued.
 	/// </exception>
-	public async Task<byte[]?> ReadMessageAsync(TimeSpan firstByteTimeout, TimeSpan messageTimeout, CancellationToken token)
+	/// <exception cref="InvalidOperationException">A previous read ended by the first byte timeout</exception>
+	public Task<byte[]?> ReadMessageAsync(TimeSpan firstByteTimeout, TimeSpan messageTimeout, CancellationToken token)
 	{
+		return ReadMessageAsync(firstByteTimeout, CancellationToken.None, messageTimeout, token);
+	}
+
+	/// <summary>
+	///   Reads the next message
+	/// </summary>
+	/// <param name="firstByteTimeout">The time to wait for the start of the message</param>
+	/// <param name="idleToken">
+	///   Ends the wait for the start of the message like the first byte timeout, e.g. once the keep alive of a connection
+	///   without queries in progress expired
+	/// </param>
+	/// <param name="messageTimeout">The time to receive the rest of the message, after it started</param>
+	/// <param name="token">The token to monitor cancellation requests</param>
+	/// <returns>
+	///   The message including the length header, or null if the stream ended or no message started before the first byte
+	///   timeout or the idle token. After that, the stream stays open for writing, e.g. the responses to the queries in
+	///   progress, but cannot be read anymore.
+	/// </returns>
+	/// <exception cref="OperationCanceledException">
+	///   On the message timeout or cancellation. The stream is closed then, as a partially read message cannot be continued.
+	/// </exception>
+	/// <exception cref="InvalidOperationException">A previous read ended by the first byte timeout or the idle token</exception>
+	public async Task<byte[]?> ReadMessageAsync(TimeSpan firstByteTimeout, CancellationToken idleToken, TimeSpan messageTimeout, CancellationToken token)
+	{
+		// the abandoned read is still pending and the pipe reader does not allow a second one
+		if (Volatile.Read(ref _isReadAbandoned) == 1)
+			throw new InvalidOperationException("The stream cannot be read anymore, as the previous read ended without a message by the first byte timeout");
+
 		using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(token);
 
 		// Not all streams observe the token (e.g. NetworkStream on .NET Framework), closing the stream aborts the read in any case
 		using var registration = timeoutCts.Token.Register(Dispose);
 
-		// The first byte timeout does not cancel the read, as canceling closes the stream
-		using var firstByteTimeoutCts = new CancellationTokenSource();
-		var firstByteTimeoutTask = firstByteTimeout == Timeout.InfiniteTimeSpan ? null : Task.Delay(firstByteTimeout, firstByteTimeoutCts.Token);
+		// Neither the first byte timeout nor the idle token cancel the read, as canceling closes the stream. The source is
+		// canceled at the end, so the delay does not stay registered on the idle token, which may live much longer.
+		using var firstByteCts = CancellationTokenSource.CreateLinkedTokenSource(idleToken);
+		if (firstByteTimeout != Timeout.InfiniteTimeSpan)
+			firstByteCts.CancelAfter(firstByteTimeout);
+
+		var firstByteTimeoutTask = (firstByteTimeout != Timeout.InfiniteTimeSpan) || idleToken.CanBeCanceled ? Task.Delay(Timeout.Infinite, firstByteCts.Token) : null;
 
 		var isMessageStarted = false;
 
@@ -79,6 +115,7 @@ internal sealed class DnsTcpMessageStream : IDisposable
 					if (await Task.WhenAny(readTask, firstByteTimeoutTask).ConfigureAwait(false) == firstByteTimeoutTask)
 					{
 						// The read ends, when the stream is disposed
+						Volatile.Write(ref _isReadAbandoned, 1);
 						_ = readTask.ContinueWith(t => t.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
 						return null;
 					}
@@ -122,7 +159,7 @@ internal sealed class DnsTcpMessageStream : IDisposable
 		}
 		finally
 		{
-			firstByteTimeoutCts.Cancel();
+			firstByteCts.Cancel();
 		}
 	}
 
