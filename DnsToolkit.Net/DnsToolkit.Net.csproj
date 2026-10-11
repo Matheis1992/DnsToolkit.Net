@@ -53,12 +53,16 @@
     <Compile Remove="Dns\Transport\HttpsServerTransportOptions.cs" />
   </ItemGroup>
 
+  <!-- In the root of the package. As content files, NuGet copied them into the projects and the output of every user of the package. -->
   <ItemGroup>
-    <Content Include="..\LICENSE" CopyToOutputDirectory="PreserveNewest" />
-    <Content Include="..\NOTICE" CopyToOutputDirectory="PreserveNewest" />
-  </ItemGroup>
-
-  <ItemGroup>
+    <None Include="..\LICENSE">
+      <Pack>True</Pack>
+      <PackagePath>\</PackagePath>
+    </None>
+    <None Include="..\NOTICE">
+      <Pack>True</Pack>
+      <PackagePath>\</PackagePath>
+    </None>
     <None Include="..\README.md">
       <Pack>True</Pack>
       <PackagePath>\</PackagePath>
