@@ -21,11 +21,19 @@ namespace DnsToolkit.Net
 {
 	internal static class TaskExtensions
 	{
+		/// <summary>
+		///   Converts a timeout in milliseconds, where 0 or less means no timeout like the timeouts of sockets
+		/// </summary>
+		public static TimeSpan ToTimeout(int milliseconds)
+		{
+			return milliseconds > 0 ? TimeSpan.FromMilliseconds(milliseconds) : Timeout.InfiniteTimeSpan;
+		}
+
 		public static async Task<T?> WithTimeout<T>(this Task<T> task, int timeout, CancellationToken token = default)
 		{
 			try
 			{
-				return await task.WaitAsync(TimeSpan.FromMilliseconds(timeout), token).ConfigureAwait(false);
+				return await task.WaitAsync(ToTimeout(timeout), token).ConfigureAwait(false);
 			}
 			catch (TimeoutException)
 			{
@@ -37,7 +45,7 @@ namespace DnsToolkit.Net
 		{
 			try
 			{
-				await task.WaitAsync(TimeSpan.FromMilliseconds(timeout), token).ConfigureAwait(false);
+				await task.WaitAsync(ToTimeout(timeout), token).ConfigureAwait(false);
 			}
 			catch (TimeoutException)
 			{

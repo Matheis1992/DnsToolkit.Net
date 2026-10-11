@@ -100,8 +100,7 @@ public class SharedPipelinedConnectionTests
 
 		finished.Dispose();
 
-		// more responses than a query can have unread, so the receive loop would wait for the finished query, if they were kept
-		for (var i = 0; i < SharedPipelinedConnection.MaxUnreadMessagesPerQuery + 4; i++)
+		for (var i = 0; i < 20; i++)
 			connection.Respond(finishedSent, "late" + i);
 		connection.Respond(otherSent, "o1");
 
@@ -111,14 +110,37 @@ public class SharedPipelinedConnectionTests
 	}
 
 	[Fact]
-	public async Task MoreUnreadMessagesThanTheLimit_AreDeliveredCompletelyAndInOrder()
+	public async Task ResponsesToOtherQueries_AreNotDelayed_ByAQueryWhichIsBehindWithReading()
+	{
+		var (connection, shared) = Create();
+		using var zoneTransfer = Lease(shared);
+		using var other = Lease(shared);
+		var zoneTransferSent = Query(0x1111, "zone");
+		var otherSent = Query(0x2222, "other");
+		await zoneTransfer.SendAsync(zoneTransferSent);
+		await other.SendAsync(otherSent);
+
+		// before, the receive loop waited for the zone transfer to read, once it had 16 unread messages
+		for (var i = 0; i < 50; i++)
+			connection.Respond(zoneTransferSent, "m" + i);
+		connection.Respond(otherSent, "o1");
+
+		var received = other.ReceiveAsync(otherSent.MessageIdentification);
+		await CompletesWithinAsync(received, TimeSpan.FromSeconds(2));
+		Assert.Equal("o1", Marker(await received));
+
+		Assert.Equal("m0", Marker(await ReceiveWithinAsync(zoneTransfer, zoneTransferSent.MessageIdentification)));
+	}
+
+	[Fact]
+	public async Task ManyUnreadMessages_AreDeliveredCompletelyAndInOrder()
 	{
 		var (connection, shared) = Create();
 		using var query = Lease(shared);
 		var sent = Query(0x1111, "zone");
 		await query.SendAsync(sent);
 
-		var count = SharedPipelinedConnection.MaxUnreadMessagesPerQuery * 3;
+		var count = 50;
 		for (var i = 0; i < count; i++)
 			connection.Respond(sent, "m" + i);
 

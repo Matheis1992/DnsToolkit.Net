@@ -159,6 +159,43 @@ public class DnsCacheTests
 	}
 
 	[Fact]
+	public async Task Nameserver_SizeLimit_CountsTheAddresses()
+	{
+		// before, every zone counted as one, whatever the number of its addresses
+		var cache = new NameserverCache(100, _scanFrequency);
+
+		for (var i = 0; i < 100; i++)
+		{
+			for (var j = 0; j < 10; j++)
+				cache.Add(Zone(i), IPAddress.Parse($"192.0.2.{j + 1}"), 3600);
+		}
+
+		Assert.True(await WaitUntilAsync(() => CountAddresses(cache, 100) <= 100), $"The nameserver cache holds {CountAddresses(cache, 100)} addresses, the limit allows 100");
+		Assert.True(cache.Count > 0);
+	}
+
+	[Fact]
+	public void Nameserver_AddressesPerZone_AreLimited_KeepingTheLongestValid()
+	{
+		var cache = new NameserverCache(NameserverCache.DEFAULT_SIZE_LIMIT, _scanFrequency, new ManualClock());
+		var zone = DomainName.Parse("example.test");
+
+		// e.g. a server, which adds new addresses with every referral
+		for (var i = 0; i < 100; i++)
+			cache.Add(zone, IPAddress.Parse($"192.0.2.{i + 1}"), 3600 + i);
+
+		Assert.True(cache.TryGetAddresses(zone, out var addresses));
+		Assert.Equal(NameserverCache.MAX_ADDRESSES_PER_ZONE, addresses!.Count);
+		Assert.Contains(IPAddress.Parse("192.0.2.100"), addresses);
+		Assert.DoesNotContain(IPAddress.Parse("192.0.2.1"), addresses);
+	}
+
+	private static int CountAddresses(NameserverCache cache, int zoneCount)
+	{
+		return Enumerable.Range(0, zoneCount).Sum(i => cache.TryGetAddresses(Zone(i), out var addresses) ? addresses!.Count : 0);
+	}
+
+	[Fact]
 	public void Nameserver_KnownAddress_GetsNewExpiration()
 	{
 		var clock = new ManualClock();

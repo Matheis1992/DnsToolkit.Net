@@ -51,6 +51,20 @@ public class QueryTimeoutTests
 	}
 
 	[Fact]
+	public async Task TimeoutOfZero_MeansNoTimeout()
+	{
+		// like the timeouts of sockets and of the client, before the connects of TCP and UDP timed out immediately
+		var completion = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+		var waiting = completion.Task.WithTimeout(0);
+
+		await Task.Delay(100);
+		Assert.False(waiting.IsCompleted, "The wait timed out immediately");
+
+		completion.SetResult(1);
+		Assert.Equal(1, await waiting);
+	}
+
+	[Fact]
 	public async Task QueryTimeout_DoesNotMarkConnectionFaulty()
 	{
 		// a pooled connection is shared by all queries to a server, so the timeout of one query must not close it

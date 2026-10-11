@@ -187,7 +187,7 @@ namespace DnsToolkit.Net.Dns
 									    && ValidateResponse(query, resendResponse.Message)
 									    && ((resendResponse.Message.ReturnCode != ReturnCode.ServerFailure)))
 									{
-										resendConnection.RestartIdleTimeout(receivedMessage.Message.GetEDnsKeepAliveTimeout());
+										resendConnection.RestartIdleTimeout(resendResponse.Message.GetEDnsKeepAliveTimeout());
 										return resendResponse.Message;
 									}
 									else
@@ -333,7 +333,8 @@ namespace DnsToolkit.Net.Dns
 
 			// One linked source for all endpoints. It has to be disposed, otherwise it stays registered on the token of the caller
 			using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(token);
-			timeoutCts.CancelAfter(QueryTimeout);
+			if (QueryTimeout > 0)
+				timeoutCts.CancelAfter(QueryTimeout);
 
 			var tasks = _endpointInfos.Select(x => SendMessageParallelAsync(multicastTransport, x, message, package, tsigKeySelector, tsigOriginalMac, results, timeoutCts.Token)).ToArray();
 

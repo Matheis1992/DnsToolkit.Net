@@ -36,7 +36,7 @@ namespace DnsToolkit.Net
 			{
 				var ar = tcpClient.BeginConnect(address, port, null, null);
 
-				if (!ar.AsyncWaitHandle.WaitOne(TimeSpan.FromMilliseconds(timeout), false))
+				if (!ar.AsyncWaitHandle.WaitOne(TaskExtensions.ToTimeout(timeout), false))
 				{
 					tcpClient.Close();
 				}
@@ -55,7 +55,7 @@ namespace DnsToolkit.Net
 		{
 			try
 			{
-				await tcpClient.ConnectAsync(address, port, token).AsTask().WaitAsync(TimeSpan.FromMilliseconds(timeout), token).ConfigureAwait(false);
+				await tcpClient.ConnectAsync(address, port, token).AsTask().WaitAsync(TaskExtensions.ToTimeout(timeout), token).ConfigureAwait(false);
 				return true;
 			}
 			catch

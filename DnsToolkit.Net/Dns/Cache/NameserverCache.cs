@@ -30,9 +30,15 @@ namespace DnsToolkit.Net.Dns
 	internal class NameserverCache
 	{
 		/// <summary>
-		///   The default maximum number of cached zones
+		///   The default maximum number of cached addresses of all zones
 		/// </summary>
-		public const long DEFAULT_SIZE_LIMIT = 10_000;
+		public const long DEFAULT_SIZE_LIMIT = 50_000;
+
+		/// <summary>
+		///   The maximum number of addresses of a zone. A zone has a few name servers with a few addresses each, so more
+		///   addresses only come from a server, which keeps adding new ones, e.g. with every referral.
+		/// </summary>
+		internal const int MAX_ADDRESSES_PER_ZONE = 32;
 
 		private static readonly TimeSpan _defaultExpirationScanFrequency = TimeSpan.FromMinutes(1);
 
@@ -53,7 +59,7 @@ namespace DnsToolkit.Net.Dns
 		public NameserverCache()
 			: this(DEFAULT_SIZE_LIMIT, _defaultExpirationScanFrequency) { }
 
-		/// <param name="sizeLimit">The maximum number of cached zones</param>
+		/// <param name="sizeLimit">The maximum number of cached addresses of all zones</param>
 		/// <param name="expirationScanFrequency">The minimum time between two scans for expired zones</param>
 		/// <param name="clock">The clock for the time to live of the addresses, the system clock if null</param>
 		internal NameserverCache(long sizeLimit, TimeSpan expirationScanFrequency, ISystemClock? clock = null)
@@ -84,11 +90,19 @@ namespace DnsToolkit.Net.Dns
 				var zone = _cache.TryGetValue(zoneName, out ZoneAddresses? existing) ? existing! : new ZoneAddresses();
 
 				DateTime zoneExpireDateUtc;
+				int addressCount;
 				lock (zone)
 				{
 					// replaces the expiration of a known address
 					zone.ExpireDatesUtc[address] = expireDateUtc;
 					RemoveExpired(zone, utcNow);
+
+					// the addresses, which expire first, are dropped
+					if (zone.ExpireDatesUtc.Count > MAX_ADDRESSES_PER_ZONE)
+					{
+						foreach (var dropped in zone.ExpireDatesUtc.OrderBy(x => x.Value).Take(zone.ExpireDatesUtc.Count - MAX_ADDRESSES_PER_ZONE).Select(x => x.Key).ToList())
+							zone.ExpireDatesUtc.Remove(dropped);
+					}
 
 					if (zone.ExpireDatesUtc.Count == 0)
 					{
@@ -97,13 +111,15 @@ namespace DnsToolkit.Net.Dns
 					}
 
 					zoneExpireDateUtc = zone.ExpireDatesUtc.Values.Max();
+					addressCount = zone.ExpireDatesUtc.Count;
 				}
 
-				// the expiration of a cache entry cannot be changed, so the entry is set again
+				// The expiration of a cache entry cannot be changed, so the entry is set again. Every address counts towards the
+				// size limit, so a zone with many addresses cannot use more memory than the limit allows.
 				_cache.Set(zoneName, zone, new MemoryCacheEntryOptions
 				{
 					AbsoluteExpiration = new DateTimeOffset(zoneExpireDateUtc, TimeSpan.Zero),
-					Size = 1,
+					Size = addressCount,
 				});
 			}
 		}

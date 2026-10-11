@@ -28,11 +28,6 @@ namespace DnsToolkit.Net.Dns;
 /// </summary>
 internal sealed class SharedPipelinedConnection : IPooledConnection
 {
-	/// <summary>
-	///   The number of messages a query can have unread, before the receive loop waits for it to read them
-	/// </summary>
-	internal const int MaxUnreadMessagesPerQuery = 16;
-
 	private readonly IPipelineableClientConnection _connection;
 	private readonly Action<SharedPipelinedConnection> _onUnusable;
 	private readonly TaskIdleCompletionSource _idleTcs;
@@ -208,7 +203,7 @@ internal sealed class SharedPipelinedConnection : IPooledConnection
 					continue;
 
 				// dropped, if the query was finished meanwhile
-				await query.TryWriteAsync(package, _closeCts.Token).ConfigureAwait(false);
+				query.TryWrite(package);
 			}
 		}
 		catch
@@ -436,11 +431,14 @@ internal sealed class PipelinedClientConnection : IClientConnection
 /// </summary>
 internal sealed class PendingQuery
 {
-	private readonly Channel<DnsReceivedRawPackage> _messages = Channel.CreateBounded<DnsReceivedRawPackage>(
-		new BoundedChannelOptions(SharedPipelinedConnection.MaxUnreadMessagesPerQuery)
+	// Unbounded, as the receive loop would otherwise have to wait for a query, which is behind with reading, and the responses
+	// to all other queries would be delayed meanwhile. The client reads the messages of a multi message response one after
+	// another and keeps all of them anyway, so the queue holds no more than the client keeps.
+	private readonly Channel<DnsReceivedRawPackage> _messages = Channel.CreateUnbounded<DnsReceivedRawPackage>(
+		new UnboundedChannelOptions
 		{
-			FullMode = BoundedChannelFullMode.Wait,
-			SingleReader = true
+			SingleReader = true,
+			SingleWriter = true
 		});
 
 	public PendingQuery(DnsMessageIdentification identification)
@@ -456,20 +454,12 @@ internal sealed class PendingQuery
 	public bool HasMessages { get; set; }
 
 	/// <summary>
-	///   Adds a received message to the queue. If the query did not read enough of the previous messages, it waits.
+	///   Adds a received message to the queue
 	/// </summary>
 	/// <returns>False, if the query is done already, so the message is dropped</returns>
-	public async Task<bool> TryWriteAsync(DnsReceivedRawPackage package, CancellationToken token)
+	public bool TryWrite(DnsReceivedRawPackage package)
 	{
-		try
-		{
-			await _messages.Writer.WriteAsync(package, token).ConfigureAwait(false);
-			return true;
-		}
-		catch (ChannelClosedException)
-		{
-			return false;
-		}
+		return _messages.Writer.TryWrite(package);
 	}
 
 	/// <summary>
