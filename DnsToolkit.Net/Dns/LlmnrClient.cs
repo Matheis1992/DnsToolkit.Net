@@ -46,9 +46,12 @@ namespace DnsToolkit.Net.Dns
 		/// <summary>
 		///   Provides a new instance with a custom timeout
 		/// </summary>
-		/// <param name="queryTimeout"> Query timeout in milliseconds </param>
+		/// <param name="queryTimeout">
+		///   Query timeout in milliseconds. The responses are collected until it expires, so it has to be greater than 0.
+		/// </param>
+		/// <exception cref="ArgumentOutOfRangeException">The timeout is 0 or less</exception>
 		public LlmnrClient(int queryTimeout)
-			: base(_addresses, queryTimeout, new IClientTransport[] { new MulticastClientTransport(DEFAULT_PORT), new TcpClientTransport(DEFAULT_PORT) }, true) { }
+			: base(_addresses, RequireMulticastQueryTimeout(queryTimeout), new IClientTransport[] { new MulticastClientTransport(DEFAULT_PORT), new TcpClientTransport(DEFAULT_PORT) }, true) { }
 
 		/// <summary>
 		///   Queries for specified records.

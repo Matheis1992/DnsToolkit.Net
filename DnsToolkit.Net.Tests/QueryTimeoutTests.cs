@@ -65,6 +65,15 @@ public class QueryTimeoutTests
 	}
 
 	[Fact]
+	public void MulticastClients_RequireAQueryTimeout()
+	{
+		// they collect the responses until the timeout, so with 0, which means no timeout, a query would never end
+		Assert.Throws<ArgumentOutOfRangeException>(() => new LlmnrClient(0));
+		Assert.Throws<ArgumentOutOfRangeException>(() => new MulticastDnsOneShotClient(0));
+		Assert.Throws<ArgumentOutOfRangeException>(() => new MulticastDnsOneShotClient(-1));
+	}
+
+	[Fact]
 	public async Task QueryTimeout_DoesNotMarkConnectionFaulty()
 	{
 		// a pooled connection is shared by all queries to a server, so the timeout of one query must not close it
@@ -85,17 +94,10 @@ public class QueryTimeoutTests
 		using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
 
 		var stopwatch = Stopwatch.StartNew();
-		DnsMessage? response = null;
-		try
-		{
-			response = await client.ResolveAsync(_name, token: cts.Token);
-		}
-		catch (OperationCanceledException)
-		{
-			// expected as well
-		}
 
-		Assert.Null(response);
+		// before, the query returned null like a query, which no server answered
+		await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.ResolveAsync(_name, token: cts.Token));
+
 		Assert.InRange(stopwatch.Elapsed, TimeSpan.Zero, TimeSpan.FromSeconds(5));
 		Assert.True(transport.Connection!.IsReceiveCanceled, "The receive was not canceled");
 		Assert.False(transport.Connection.IsFaulty, "The connection was marked faulty because the caller canceled one query");

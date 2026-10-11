@@ -223,6 +223,11 @@ namespace DnsToolkit.Net.Dns
 			byte[] messageData;
 			int length;
 
+			// The labels of the signature must not exceed the labels of the owner name (RFC 4035, section 5.3.1). Such a
+			// signature covers no record, it must not prevent the validation with another signature.
+			if (coveredRecords.Any(x => x.Name.LabelCount < Labels))
+				return false;
+
 			EncodeSigningBuffer(coveredRecords, out messageData, out length);
 
 			// the algorithm of the key has to match the one of the signature (RFC 4035, section 5.3.1)

@@ -72,6 +72,18 @@ namespace DnsToolkit.Net.Dns
 		public int QueryTimeout { get; }
 
 		/// <summary>
+		///   A multicast query collects the responses until the query timeout expires. With 0 or less, which means no timeout
+		///   for other queries, it would never end. Checked before the transports are created, so none of them is left open.
+		/// </summary>
+		private protected static int RequireMulticastQueryTimeout(int queryTimeout)
+		{
+			if (queryTimeout <= 0)
+				throw new ArgumentOutOfRangeException(nameof(queryTimeout), "A multicast query collects the responses until the query timeout, so it has to be greater than 0");
+
+			return queryTimeout;
+		}
+
+		/// <summary>
 		///   Gets or set a value indicating whether the response is validated as described in
 		///   <a href="http://tools.ietf.org/id/draft-vixie-dnsext-dns0x20-00.txt">draft-vixie-dnsext-dns0x20-00</a>
 		/// </summary>
@@ -206,7 +218,9 @@ namespace DnsToolkit.Net.Dns
 				}
 				catch (Exception e) when (IsQueryAbort(e, token))
 				{
-					// Only this query was aborted, a pooled connection stays usable for the other queries
+					// Only this query was aborted, a pooled connection stays usable for the other queries. After a timeout the
+					// next server is tried, but a cancellation of the caller ends the query.
+					token.ThrowIfCancellationRequested();
 				}
 				catch (Exception e)
 				{
@@ -218,6 +232,9 @@ namespace DnsToolkit.Net.Dns
 					connection?.Dispose();
 				}
 			}
+
+			// e.g. a connect, which was canceled, returns no connection instead of throwing
+			token.ThrowIfCancellationRequested();
 
 			return response;
 		}

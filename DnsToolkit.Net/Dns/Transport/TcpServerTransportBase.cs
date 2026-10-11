@@ -296,6 +296,9 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 			}
 			catch
 			{
+				// Also a response, which timed out while it waited for the others, is closing the connection. Otherwise the
+				// client would wait for it on a connection, which still looks healthy, instead of retrying on a new one.
+				_messageStream.Dispose();
 				return false;
 			}
 		}

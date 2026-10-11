@@ -54,6 +54,20 @@ public class DnsSecValidatorTests
 	}
 
 	[Fact]
+	public async Task SignatureWithMoreLabelsThanTheOwnerName_DoesNotPreventTheValidationWithTheRightSignature()
+	{
+		var (message, records) = SignedAnswer();
+		var signature = message.AnswerRecords.OfType<RrSigRecord>().Single();
+
+		// before, the encoding of the malformed signature threw and aborted the validation
+		var malformed = new RrSigRecord(signature.Name, signature.RecordClass, signature.TimeToLive, signature.TypeCovered, signature.Algorithm, (byte) (signature.Labels + 3),
+			signature.OriginalTimeToLive, signature.SignatureExpiration, signature.SignatureInception, signature.KeyTag, signature.SignersName, signature.Signature);
+		message.AnswerRecords.Insert(1, malformed);
+
+		Assert.Equal(DnsSecValidationResult.Signed, await ValidateAnswerAsync(new[] { _key }, message, records));
+	}
+
+	[Fact]
 	public async Task OnlyTwoKeysWithTheSameKeyTag_AreTried()
 	{
 		var (message, records) = SignedAnswer();
