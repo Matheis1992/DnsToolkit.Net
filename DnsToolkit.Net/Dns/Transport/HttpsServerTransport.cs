@@ -167,9 +167,22 @@ public class HttpsServerTransport : IAsyncClosableServerTransport, IAsyncDisposa
 		{
 			// the client aborted the request, so the server skips it, if it is still queued
 			connection.Abandon();
+			Interlocked.Increment(ref _abandonedRequests);
 			throw;
 		}
 	}
+
+	private int _abandonedRequests;
+
+	/// <summary>
+	///   The number of requests, which the clients aborted, before they were answered
+	/// </summary>
+	internal int AbandonedRequests => Volatile.Read(ref _abandonedRequests);
+
+	/// <summary>
+	///   The number of requests, which wait for the DNS server to take them, including the abandoned ones
+	/// </summary>
+	internal int QueuedRequests => Volatile.Read(ref _run)?.ConnectionQueue.Reader.Count ?? 0;
 
 	/// <summary>
 	///   Rejects the requests, which were not passed to the server yet, and all further requests. Otherwise they would wait

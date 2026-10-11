@@ -394,7 +394,8 @@ public class DohServerTests
 		var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
 		// the server processes one query at a time and one more waits in the queue of the transport
-		var server = new DnsServer(new HttpsServerTransport(LocalDnsServer.SharedCertificate, new HttpsServerTransportOptions { Address = IPAddress.Loopback, Port = port, MaxQueuedRequests = 1 }))
+		var transport = new HttpsServerTransport(LocalDnsServer.SharedCertificate, new HttpsServerTransportOptions { Address = IPAddress.Loopback, Port = port, MaxQueuedRequests = 1 });
+		var server = new DnsServer(transport)
 		{
 			MaxConcurrentConnectionsPerTransport = 1
 		};
@@ -413,7 +414,7 @@ public class DohServerTests
 			Assert.True(await Task.WhenAny(received.Task, Task.Delay(TimeSpan.FromSeconds(5))) == received.Task, "The query was not received");
 
 			var queued = PostQueryAsync(http, port, 0x2222);
-			await Task.Delay(500);
+			Assert.True(await WaitUntilAsync(() => transport.QueuedRequests == 1), "The second query was not queued");
 
 			// before, the queue grew without limit
 			var rejected = await PostQueryAsync(http, port, 0x3333);
@@ -438,7 +439,8 @@ public class DohServerTests
 		var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 		var processed = new List<ushort>();
 
-		var server = new DnsServer(new HttpsServerTransport(LocalDnsServer.SharedCertificate, new HttpsServerTransportOptions { Address = IPAddress.Loopback, Port = port }))
+		var transport = new HttpsServerTransport(LocalDnsServer.SharedCertificate, new HttpsServerTransportOptions { Address = IPAddress.Loopback, Port = port });
+		var server = new DnsServer(transport)
 		{
 			MaxConcurrentConnectionsPerTransport = 1
 		};
@@ -460,13 +462,16 @@ public class DohServerTests
 			Assert.True(await Task.WhenAny(received.Task, Task.Delay(TimeSpan.FromSeconds(5))) == received.Task, "The query was not received");
 
 			// waits in the queue of the transport, until the client gives up
-			using (var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500)))
+			using (var cts = new CancellationTokenSource())
 			{
-				var content = DnsContent(Query(0x2222));
-				await Assert.ThrowsAnyAsync<OperationCanceledException>(() => http.PostAsync($"https://{Host}:{port}/dns-query", content, cts.Token));
+				var aborted = http.PostAsync($"https://{Host}:{port}/dns-query", DnsContent(Query(0x2222)), cts.Token);
+				Assert.True(await WaitUntilAsync(() => transport.QueuedRequests == 1), "The second query was not queued");
+
+				cts.Cancel();
+				await Assert.ThrowsAnyAsync<OperationCanceledException>(() => aborted);
 			}
 
-			await Task.Delay(500);
+			Assert.True(await WaitUntilAsync(() => transport.AbandonedRequests == 1), "The server did not notice the aborted request");
 			release.TrySetResult(true);
 
 			Assert.Equal(HttpStatusCode.OK, (await inProgress).StatusCode);
@@ -536,6 +541,22 @@ public class DohServerTests
 			release.TrySetResult(true);
 			await ((IAsyncDisposable) server).DisposeAsync();
 		}
+	}
+
+	/// <summary>
+	///   Checks the condition repeatedly, instead of waiting a fixed time, which may be too short on a busy machine
+	/// </summary>
+	private static async Task<bool> WaitUntilAsync(Func<bool> condition)
+	{
+		var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+		while (stopwatch.Elapsed < TimeSpan.FromSeconds(10))
+		{
+			if (condition())
+				return true;
+			await Task.Delay(20);
+		}
+
+		return condition();
 	}
 
 	private static StartedServer StartServer(int port)

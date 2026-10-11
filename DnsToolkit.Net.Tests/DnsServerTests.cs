@@ -194,12 +194,15 @@ public class DnsServerTests
 		var connection = new FakeServerConnection(Enumerable.Range(0, 10).Select(_ => CreateQueryPackage()).ToArray());
 		var transport = new FakeServerTransport(connection);
 		var released = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+		var limitReached = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 		var started = 0;
 
 		var server = new DnsServer(transport) { MaxConcurrentQueriesPerConnection = 3 };
 		server.QueryReceived += async (sender, e) =>
 		{
-			Interlocked.Increment(ref started);
+			if (Interlocked.Increment(ref started) == 3)
+				limitReached.TrySetResult(true);
+
 			await released.Task;
 			await AnswerQuery(sender, e);
 		};
@@ -207,9 +210,11 @@ public class DnsServerTests
 
 		try
 		{
-			await Task.Delay(500);
+			Assert.True(await Task.WhenAny(limitReached.Task, Task.Delay(TimeSpan.FromSeconds(10))) == limitReached.Task, "Three queries were not started");
 
-			// before, all queries of the connection were processed at the same time
+			// A further query would start right after the third one, so a short time shows that none does. On a slow machine
+			// this can only miss an error, but not fail without one. Before, all queries were processed at the same time.
+			await Task.Delay(200);
 			Assert.Equal(3, Volatile.Read(ref started));
 
 			released.TrySetResult(true);
