@@ -69,9 +69,12 @@ public class TcpTransportTests
 		Assert.Equal(0x4242, (await response).TransactionID);
 	}
 
-	[IPv6Fact]
+	[Fact]
 	public async Task TransportBoundToIPv6Any_AcceptsIPv4_AlsoAfterARestart()
 	{
+		// without IPv6, the test is reported as skipped instead of as passed
+		Assert.SkipUnless(Socket.OSSupportsIPv6, "IPv6 is not supported by the operating system");
+
 		var port = LocalDnsServer.GetFreePort();
 		var transport = new TcpServerTransport(new IPEndPoint(IPAddress.IPv6Any, port));
 		try
