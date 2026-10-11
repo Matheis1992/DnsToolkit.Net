@@ -115,7 +115,7 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 	public async Task<List<T>> ResolveAsync<T>(DomainName name, RecordType recordType = RecordType.A, RecordClass recordClass = RecordClass.INet, CancellationToken token = default)
 		where T : DnsRecordBase
 	{
-		var res = await ResolveSecureAsync<T>(name, recordType, recordClass, token);
+		var res = await ResolveSecureAsync<T>(name, recordType, recordClass, token).ConfigureAwait(false);
 		return res.Records;
 	}
 
@@ -164,7 +164,7 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 				IsRecursionDesired = false,
 				IsCheckingDisabled = true,
 				EDnsOptions = DnsQueryOptions.DefaultDnsSecQueryOptions.EDnsOptions
-			}, token);
+			}, token).ConfigureAwait(false);
 
 			if ((msg != null) && ((msg.ReturnCode == ReturnCode.NoError) || (msg.ReturnCode == ReturnCode.NxDomain)))
 			{
@@ -199,7 +199,7 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 						{
 							NsRecord firstReferal = referralRecords.First();
 
-							var newLookedUpServers = await ResolveHostWithTtlAsync(firstReferal.NameServer, resolveContext, token);
+							var newLookedUpServers = await ResolveHostWithTtlAsync(firstReferal.NameServer, resolveContext, token).ConfigureAwait(false);
 
 							foreach (var newServer in newLookedUpServers)
 							{
@@ -234,17 +234,17 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 			if (_cache.TryGetRecords(name, RecordType.CName, recordClass, out DnsCacheRecordList<CNameRecord>? cachedCNames))
 			{
 				var canonicalName = cachedCNames!.First().CanonicalName;
-				var cNameResult = await ResolveAsyncInternal<T>(canonicalName, recordType, recordClass, resolveContext, token);
+				var cNameResult = await ResolveAsyncInternal<T>(canonicalName, recordType, recordClass, resolveContext, token).ConfigureAwait(false);
 				return new DnsSecResult<T>(cNameResult.Records, cachedCNames!.ValidationResult == cNameResult.ValidationResult ? cachedCNames.ValidationResult : DnsSecValidationResult.Unsigned);
 			}
 
-			var msg = await ResolveMessageAsync(name, recordType, recordClass, resolveContext, token);
+			var msg = await ResolveMessageAsync(name, recordType, recordClass, resolveContext, token).ConfigureAwait(false);
 
 			// check for cname
 			var cNameRecords = msg?.AnswerRecords.Where(x => (x.RecordType == RecordType.CName) && (x.RecordClass == recordClass) && x.Name.Equals(name)).ToList();
 			if (cNameRecords?.Count > 0)
 			{
-				var cNameValidationResult = await _validator.ValidateAsync(name, RecordType.CName, recordClass, msg!, cNameRecords, resolveContext, token);
+				var cNameValidationResult = await _validator.ValidateAsync(name, RecordType.CName, recordClass, msg!, cNameRecords, resolveContext, token).ConfigureAwait(false);
 				if ((cNameValidationResult == DnsSecValidationResult.Bogus) || (cNameValidationResult == DnsSecValidationResult.Indeterminate))
 					throw new DnsSecValidationException("CNAME record could not be validated");
 
@@ -255,7 +255,7 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 				var matchingAdditionalRecords = msg?.AnswerRecords.Where(x => (x.RecordType == recordType) && (x.RecordClass == recordClass) && x.Name.Equals(canonicalName)).ToList();
 				if (matchingAdditionalRecords?.Count > 0)
 				{
-					var matchingValidationResult = await _validator.ValidateAsync(canonicalName, recordType, recordClass, msg!, matchingAdditionalRecords, resolveContext, token);
+					var matchingValidationResult = await _validator.ValidateAsync(canonicalName, recordType, recordClass, msg!, matchingAdditionalRecords, resolveContext, token).ConfigureAwait(false);
 					if ((matchingValidationResult == DnsSecValidationResult.Bogus) || (matchingValidationResult == DnsSecValidationResult.Indeterminate))
 						throw new DnsSecValidationException("CNAME matching records could not be validated");
 
@@ -265,7 +265,7 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 					return new DnsSecResult<T>(matchingAdditionalRecords.OfType<T>().ToList(), validationResult);
 				}
 
-				var cNameResults = await ResolveAsyncInternal<T>(canonicalName, recordType, recordClass, resolveContext, token);
+				var cNameResults = await ResolveAsyncInternal<T>(canonicalName, recordType, recordClass, resolveContext, token).ConfigureAwait(false);
 				return new DnsSecResult<T>(cNameResults.Records, cNameValidationResult == cNameResults.ValidationResult ? cNameValidationResult : DnsSecValidationResult.Unsigned);
 			}
 
@@ -273,7 +273,7 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 			var answerRecords = msg?.AnswerRecords.Where(x => (x.RecordType == recordType) && (x.RecordClass == recordClass) && x.Name.Equals(name)).ToList();
 			if (answerRecords?.Count > 0)
 			{
-				var validationResult = await _validator.ValidateAsync(name, recordType, recordClass, msg!, answerRecords, resolveContext, token);
+				var validationResult = await _validator.ValidateAsync(name, recordType, recordClass, msg!, answerRecords, resolveContext, token).ConfigureAwait(false);
 				if ((validationResult == DnsSecValidationResult.Bogus) || (validationResult == DnsSecValidationResult.Indeterminate))
 					throw new DnsSecValidationException("Response records could not be validated");
 
@@ -291,7 +291,7 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 
 			if (soaRecord != null)
 			{
-				var validationResult = await _validator.ValidateAsync(name, recordType, recordClass, msg!, answerRecords ?? new List<DnsRecordBase>(), resolveContext, token);
+				var validationResult = await _validator.ValidateAsync(name, recordType, recordClass, msg!, answerRecords ?? new List<DnsRecordBase>(), resolveContext, token).ConfigureAwait(false);
 				if ((validationResult == DnsSecValidationResult.Bogus) || (validationResult == DnsSecValidationResult.Indeterminate))
 					throw new DnsSecValidationException("Negative answer could not be validated");
 
@@ -309,10 +309,10 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 	{
 		var result = new List<Tuple<IPAddress, int>>();
 
-		var aaaaRecords = await ResolveAsyncInternal<AaaaRecord>(name, RecordType.Aaaa, RecordClass.INet, resolveContext, token);
+		var aaaaRecords = await ResolveAsyncInternal<AaaaRecord>(name, RecordType.Aaaa, RecordClass.INet, resolveContext, token).ConfigureAwait(false);
 		result.AddRange(aaaaRecords.Records.Select(x => new Tuple<IPAddress, int>(x.Address, x.TimeToLive)));
 
-		var aRecords = await ResolveAsyncInternal<ARecord>(name, RecordType.A, RecordClass.INet, resolveContext, token);
+		var aRecords = await ResolveAsyncInternal<ARecord>(name, RecordType.A, RecordClass.INet, resolveContext, token).ConfigureAwait(false);
 		result.AddRange(aRecords.Records.Select(x => new Tuple<IPAddress, int>(x.Address, x.TimeToLive)));
 
 		return result;

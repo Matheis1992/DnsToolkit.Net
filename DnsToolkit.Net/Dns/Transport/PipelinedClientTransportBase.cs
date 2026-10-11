@@ -66,7 +66,7 @@ public abstract class PipelinedClientTransportBase : IClientTransport
 			throw new NotSupportedException("Multicast is not supported on pipelined transports");
 
 		var address = endpointInfo.DestinationAddress;
-		var connection = await _pool.GetOrConnectAsync(address, () => CreateSharedConnectionAsync(endpointInfo, queryTimeout), token);
+		var connection = await _pool.GetOrConnectAsync(address, () => CreateSharedConnectionAsync(endpointInfo, queryTimeout), token).ConfigureAwait(false);
 
 		return connection == null ? null : new PipelinedClientConnection(connection, this);
 	}
@@ -74,7 +74,7 @@ public abstract class PipelinedClientTransportBase : IClientTransport
 	private async Task<SharedPipelinedConnection?> CreateSharedConnectionAsync(DnsClientEndpointInfo endpointInfo, int queryTimeout)
 	{
 		// not canceled by the caller, as the connection is shared by all queries to the server
-		var connection = await ConnectInternalAsync(endpointInfo, queryTimeout, CancellationToken.None);
+		var connection = await ConnectInternalAsync(endpointInfo, queryTimeout, CancellationToken.None).ConfigureAwait(false);
 
 		if (connection == null)
 			return null;
@@ -99,7 +99,7 @@ public abstract class PipelinedClientTransportBase : IClientTransport
 	/// <returns>A pooled connection or null, if no connection to the specified endpoint exists in the pool</returns>
 	public async Task<IClientConnection?> GetPooledConnectionAsync(DnsClientEndpointInfo endpointInfo, CancellationToken token = default)
 	{
-		var connection = await _pool.GetPooledAsync(endpointInfo.DestinationAddress, token);
+		var connection = await _pool.GetPooledAsync(endpointInfo.DestinationAddress, token).ConfigureAwait(false);
 
 		return connection == null ? null : new PipelinedClientConnection(connection, this);
 	}

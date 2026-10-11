@@ -386,7 +386,7 @@ namespace DnsToolkit.Net.Dns
 				try
 				{
 					// wait for a free slot before accepting, so the backlog of the operating system holds further clients
-					await connectionSlots.WaitAsync(token);
+					await connectionSlots.WaitAsync(token).ConfigureAwait(false);
 				}
 				catch (OperationCanceledException)
 				{
@@ -397,7 +397,7 @@ namespace DnsToolkit.Net.Dns
 
 				try
 				{
-					connection = await transport.AcceptConnectionAsync(token);
+					connection = await transport.AcceptConnectionAsync(token).ConfigureAwait(false);
 				}
 				catch (Exception) when (token.IsCancellationRequested)
 				{
@@ -419,7 +419,7 @@ namespace DnsToolkit.Net.Dns
 					// A transport which fails permanently fails immediately again, so wait longer after each failure.
 					try
 					{
-						await Task.Delay(GetFailedAcceptDelay(++failedAcceptCount), token);
+						await Task.Delay(GetFailedAcceptDelay(++failedAcceptCount), token).ConfigureAwait(false);
 					}
 					catch (OperationCanceledException)
 					{
@@ -497,17 +497,17 @@ namespace DnsToolkit.Net.Dns
 			try
 			{
 				var clientConnectedEventArgs = new ClientConnectedEventArgs(connection.Transport.TransportProtocol, connection.RemoteEndPoint, connection.LocalEndPoint);
-				await ClientConnected.RaiseAsync(this, clientConnectedEventArgs);
+				await ClientConnected.RaiseAsync(this, clientConnectedEventArgs).ConfigureAwait(false);
 
 				if (clientConnectedEventArgs.RefuseConnect)
 					return;
 
-				if (!await connection.InitializeAsync(token))
+				if (!await connection.InitializeAsync(token).ConfigureAwait(false))
 					return;
 
 				while (connection.CanRead)
 				{
-					var queryPackage = await connection.ReceiveAsync(token);
+					var queryPackage = await connection.ReceiveAsync(token).ConfigureAwait(false);
 
 					if (queryPackage == null)
 						break;
@@ -548,7 +548,7 @@ namespace DnsToolkit.Net.Dns
 				DnsMessageBase response;
 				try
 				{
-					response = await ProcessMessageAsync(query, connection.Transport.TransportProtocol, connection.RemoteEndPoint!);
+					response = await ProcessMessageAsync(query, connection.Transport.TransportProtocol, connection.RemoteEndPoint!).ConfigureAwait(false);
 				}
 				catch (Exception ex)
 				{
@@ -561,7 +561,7 @@ namespace DnsToolkit.Net.Dns
 
 				if (responsePackage.Length <= connection.Transport.DefaultAllowedResponseSize)
 				{
-					await connection.SendAsync(responsePackage, abortToken);
+					await connection.SendAsync(responsePackage, abortToken).ConfigureAwait(false);
 				}
 				else
 				{
@@ -572,7 +572,7 @@ namespace DnsToolkit.Net.Dns
 						foreach (var partialResponse in response.SplitResponse())
 						{
 							responsePackage = partialResponse.Encode(tsigMac, isSubSequentResponse, out newTsigMac);
-							await connection.SendAsync(responsePackage, abortToken);
+							await connection.SendAsync(responsePackage, abortToken).ConfigureAwait(false);
 							isSubSequentResponse = true;
 							tsigMac = newTsigMac;
 						}
@@ -665,7 +665,7 @@ namespace DnsToolkit.Net.Dns
 						}
 						#endregion
 
-						await connection.SendAsync(responsePackage, abortToken);
+						await connection.SendAsync(responsePackage, abortToken).ConfigureAwait(false);
 					}
 					else
 					{
@@ -674,7 +674,7 @@ namespace DnsToolkit.Net.Dns
 						response = query.CreateFailureResponse();
 
 						responsePackage = response.Encode(tsigMac, false, out newTsigMac);
-						await connection.SendAsync(responsePackage, abortToken);
+						await connection.SendAsync(responsePackage, abortToken).ConfigureAwait(false);
 					}
 				}
 
@@ -746,7 +746,7 @@ namespace DnsToolkit.Net.Dns
 			}
 
 			QueryReceivedEventArgs eventArgs = new QueryReceivedEventArgs(query, transportProtocol, remoteEndpoint);
-			await QueryReceived.RaiseAsync(this, eventArgs);
+			await QueryReceived.RaiseAsync(this, eventArgs).ConfigureAwait(false);
 			return eventArgs.Response ?? query.CreateFailureResponse();
 		}
 

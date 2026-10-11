@@ -47,7 +47,7 @@ namespace DnsToolkit.Net.Dns
 
 			try
 			{
-				return await ValidateAsync(name, recordType, recordClass, msg, resultRecords, state, budget, token);
+				return await ValidateAsync(name, recordType, recordClass, msg, resultRecords, state, budget, token).ConfigureAwait(false);
 			}
 			catch (DnsSecValidationLimitExceededException)
 			{
@@ -65,22 +65,22 @@ namespace DnsToolkit.Net.Dns
 
 			if (rrSigRecords.Count == 0)
 			{
-				return await ValidateOptOut(name, recordClass, state, budget, token) ? DnsSecValidationResult.Unsigned : DnsSecValidationResult.Bogus;
+				return await ValidateOptOut(name, recordClass, state, budget, token).ConfigureAwait(false) ? DnsSecValidationResult.Unsigned : DnsSecValidationResult.Bogus;
 			}
 
 			DomainName zoneApex = rrSigRecords.OrderByDescending(x => x.Labels).First().SignersName;
 
 			if (resultRecords.Count != 0)
-				return await ValidateRrSigAsync(name, recordType, recordClass, resultRecords, rrSigRecords, zoneApex, msg, state, budget, token);
+				return await ValidateRrSigAsync(name, recordType, recordClass, resultRecords, rrSigRecords, zoneApex, msg, state, budget, token).ConfigureAwait(false);
 
-			return await ValidateNonExistenceAsync(name, recordType, recordClass, rrSigRecords, DomainName.Asterisk + zoneApex, zoneApex, msg, state, budget, token);
+			return await ValidateNonExistenceAsync(name, recordType, recordClass, rrSigRecords, DomainName.Asterisk + zoneApex, zoneApex, msg, state, budget, token).ConfigureAwait(false);
 		}
 
 		private async Task<bool> ValidateOptOut(DomainName name, RecordClass recordClass, TState state, DnsSecValidationBudget budget, CancellationToken token)
 		{
 			while (!name.IsRoot)
 			{
-				DnsMessage? msg = await _resolver.ResolveMessageAsync(name, RecordType.Ds, recordClass, state, token);
+				DnsMessage? msg = await _resolver.ResolveMessageAsync(name, RecordType.Ds, recordClass, state, token).ConfigureAwait(false);
 
 				if ((msg == null) || ((msg.ReturnCode != ReturnCode.NoError) && (msg.ReturnCode != ReturnCode.NxDomain)))
 				{
@@ -96,7 +96,7 @@ namespace DnsToolkit.Net.Dns
 				{
 					DomainName zoneApex = rrSigRecords.OrderByDescending(x => x.Labels).First().SignersName;
 
-					var nonExistenceValidation = await ValidateNonExistenceAsync(name, RecordType.Ds, recordClass, rrSigRecords, name, zoneApex, msg, state, budget, token);
+					var nonExistenceValidation = await ValidateNonExistenceAsync(name, RecordType.Ds, recordClass, rrSigRecords, name, zoneApex, msg, state, budget, token).ConfigureAwait(false);
 					if ((nonExistenceValidation != DnsSecValidationResult.Bogus) && (nonExistenceValidation != DnsSecValidationResult.Indeterminate))
 						return true;
 				}
@@ -109,11 +109,11 @@ namespace DnsToolkit.Net.Dns
 
 		private async Task<DnsSecValidationResult> ValidateNonExistenceAsync(DomainName name, RecordType recordType, RecordClass recordClass, List<RrSigRecord> rrSigRecords, DomainName stop, DomainName zoneApex, DnsMessage msg, TState state, DnsSecValidationBudget budget, CancellationToken token)
 		{
-			var nsecRes = await ValidateNSecAsync(name, recordType, recordClass, rrSigRecords, stop, zoneApex, msg, state, budget, token);
+			var nsecRes = await ValidateNSecAsync(name, recordType, recordClass, rrSigRecords, stop, zoneApex, msg, state, budget, token).ConfigureAwait(false);
 			if (nsecRes == DnsSecValidationResult.Signed)
 				return nsecRes;
 
-			var nsec3Res = await ValidateNSec3Async(name, recordType, recordClass, rrSigRecords, stop.Equals(DomainName.Asterisk + zoneApex), zoneApex, msg, state, budget, token);
+			var nsec3Res = await ValidateNSec3Async(name, recordType, recordClass, rrSigRecords, stop.Equals(DomainName.Asterisk + zoneApex), zoneApex, msg, state, budget, token).ConfigureAwait(false);
 			if (nsec3Res == DnsSecValidationResult.Signed)
 				return nsec3Res;
 
@@ -135,7 +135,7 @@ namespace DnsToolkit.Net.Dns
 
 			foreach (var nsecGroup in nsecRecords.GroupBy(x => x.Name))
 			{
-				DnsSecValidationResult validationResult = await ValidateRrSigAsync(nsecGroup.Key, RecordType.NSec, recordClass, nsecGroup.ToList(), rrSigRecords, zoneApex, msg, state, budget, token);
+				DnsSecValidationResult validationResult = await ValidateRrSigAsync(nsecGroup.Key, RecordType.NSec, recordClass, nsecGroup.ToList(), rrSigRecords, zoneApex, msg, state, budget, token).ConfigureAwait(false);
 
 				if (validationResult != DnsSecValidationResult.Signed)
 					return validationResult;
@@ -175,7 +175,7 @@ namespace DnsToolkit.Net.Dns
 
 			foreach (var nsecGroup in nsecRecords.GroupBy(x => x.Name))
 			{
-				DnsSecValidationResult validationResult = await ValidateRrSigAsync(nsecGroup.Key, RecordType.NSec3, recordClass, nsecGroup.ToList(), rrSigRecords, zoneApex, msg, state, budget, token);
+				DnsSecValidationResult validationResult = await ValidateRrSigAsync(nsecGroup.Key, RecordType.NSec3, recordClass, nsecGroup.ToList(), rrSigRecords, zoneApex, msg, state, budget, token).ConfigureAwait(false);
 
 				if (validationResult != DnsSecValidationResult.Signed)
 					return validationResult;
@@ -248,14 +248,14 @@ namespace DnsToolkit.Net.Dns
 
 			foreach (var record in rrSigRecords.Where(x => x.Name.Equals(name) && (x.TypeCovered == recordType)))
 			{
-				res = await ValidateRrSigAsync(record, resultRecords, recordClass, state, budget, token);
+				res = await ValidateRrSigAsync(record, resultRecords, recordClass, state, budget, token).ConfigureAwait(false);
 				if (res == DnsSecValidationResult.Signed)
 				{
 					if ((record.Labels == name.LabelCount)
 					    || ((name.Labels[0] == "*") && (record.Labels == name.LabelCount - 1)))
 						return DnsSecValidationResult.Signed;
 
-					if (await ValidateNonExistenceAsync(name, recordType, recordClass, rrSigRecords, DomainName.Asterisk + record.Name.GetParentName(record.Name.LabelCount - record.Labels), zoneApex, msg, state, budget, token) == DnsSecValidationResult.Signed)
+					if (await ValidateNonExistenceAsync(name, recordType, recordClass, rrSigRecords, DomainName.Asterisk + record.Name.GetParentName(record.Name.LabelCount - record.Labels), zoneApex, msg, state, budget, token).ConfigureAwait(false) == DnsSecValidationResult.Signed)
 						return DnsSecValidationResult.Signed;
 				}
 			}
@@ -276,7 +276,7 @@ namespace DnsToolkit.Net.Dns
 				}
 				else
 				{
-					var dsRecordResults = await _resolver.ResolveSecureAsync<DsRecord>(rrSigRecord.SignersName, RecordType.Ds, recordClass, state, token);
+					var dsRecordResults = await _resolver.ResolveSecureAsync<DsRecord>(rrSigRecord.SignersName, RecordType.Ds, recordClass, state, token).ConfigureAwait(false);
 
 					if ((dsRecordResults.ValidationResult == DnsSecValidationResult.Bogus) || (dsRecordResults.ValidationResult == DnsSecValidationResult.Indeterminate))
 						throw new DnsSecValidationException("DS records could not be retrieved");
@@ -297,7 +297,7 @@ namespace DnsToolkit.Net.Dns
 			}
 			else
 			{
-				var dnsKeyRecordResults = await _resolver.ResolveSecureAsync<DnsKeyRecord>(rrSigRecord.SignersName, RecordType.DnsKey, recordClass, state, token);
+				var dnsKeyRecordResults = await _resolver.ResolveSecureAsync<DnsKeyRecord>(rrSigRecord.SignersName, RecordType.DnsKey, recordClass, state, token).ConfigureAwait(false);
 
 				if ((dnsKeyRecordResults.ValidationResult == DnsSecValidationResult.Bogus) || (dnsKeyRecordResults.ValidationResult == DnsSecValidationResult.Indeterminate))
 					throw new DnsSecValidationException("DNSKEY records could not be retrieved");

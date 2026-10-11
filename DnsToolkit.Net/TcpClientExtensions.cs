@@ -54,7 +54,7 @@ namespace DnsToolkit.Net
 		{
 			try
 			{
-				await tcpClient.ConnectAsync(address, port, token).AsTask().WaitAsync(TimeSpan.FromMilliseconds(timeout), token);
+				await tcpClient.ConnectAsync(address, port, token).AsTask().WaitAsync(TimeSpan.FromMilliseconds(timeout), token).ConfigureAwait(false);
 				return true;
 			}
 			catch

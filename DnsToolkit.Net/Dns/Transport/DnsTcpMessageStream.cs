@@ -63,7 +63,7 @@ internal sealed class DnsTcpMessageStream : IDisposable
 		{
 			while (true)
 			{
-				var result = await _reader.ReadAsync(timeoutCts.Token);
+				var result = await _reader.ReadAsync(timeoutCts.Token).ConfigureAwait(false);
 				var buffer = result.Buffer;
 
 				if (TryReadMessage(ref buffer, out var message))
@@ -103,11 +103,11 @@ internal sealed class DnsTcpMessageStream : IDisposable
 	/// <param name="token">The token to monitor cancellation requests</param>
 	public async Task WriteMessageAsync(ArraySegment<byte> messageWithLengthHeader, CancellationToken token)
 	{
-		await _writeLock.WaitAsync(token);
+		await _writeLock.WaitAsync(token).ConfigureAwait(false);
 		try
 		{
-			await _stream.WriteAsync(messageWithLengthHeader.Array!, messageWithLengthHeader.Offset, messageWithLengthHeader.Count, token);
-			await _stream.FlushAsync(token);
+			await _stream.WriteAsync(messageWithLengthHeader.Array!, messageWithLengthHeader.Offset, messageWithLengthHeader.Count, token).ConfigureAwait(false);
+			await _stream.FlushAsync(token).ConfigureAwait(false);
 		}
 		finally
 		{

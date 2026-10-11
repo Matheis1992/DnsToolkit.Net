@@ -8,6 +8,8 @@
     <BaseOutputPath>..\bin</BaseOutputPath>
     <BaseIntermediateOutputPath></BaseIntermediateOutputPath>
     <Nullable>enable</Nullable>
+    <!-- the analyzers only run for .NET 5 or later by default, the code for netstandard2.0 is checked as well -->
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
     <Title>DnsToolkit.Net - C#/.Net DNS client/server, DNSSEC, DANE and SPF Library</Title>
     <Authors>Alexander Reinert, Matheis1992</Authors>
     <Description>A complete managed .Net DNS and DNSSEC client, a DNS server (UDP, TCP, TLS, HTTPS), DANE validation and SPF and SenderID validation. Targets netstandard2.0, net8.0 and net10.0. Based on ARSoft.Tools.Net by Alexander Reinert.</Description>

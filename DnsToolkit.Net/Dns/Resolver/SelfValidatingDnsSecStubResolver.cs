@@ -105,7 +105,7 @@ namespace DnsToolkit.Net.Dns
 		{
 			_ = name ?? throw new ArgumentNullException(nameof(name), "Name must be provided");
 
-			var res = await ResolveSecureAsync<T>(name, recordType, recordClass, token);
+			var res = await ResolveSecureAsync<T>(name, recordType, recordClass, token).ConfigureAwait(false);
 
 			return res.Records;
 		}
@@ -139,7 +139,7 @@ namespace DnsToolkit.Net.Dns
 		{
 			_ = name ?? throw new ArgumentNullException(nameof(name), "Name must be provided");
 
-			return await ResolveSecureAsyncInternal<T>(name, recordType, recordClass, token, new ResolveLoopProtector());
+			return await ResolveSecureAsyncInternal<T>(name, recordType, recordClass, token, new ResolveLoopProtector()).ConfigureAwait(false);
 		}
 
 		private async Task<DnsSecResult<T>> ResolveSecureAsyncInternal<T>(DomainName name, RecordType recordType, RecordClass recordClass, CancellationToken token, ResolveLoopProtector resolveLoopProtector) where T : DnsRecordBase
@@ -156,7 +156,7 @@ namespace DnsToolkit.Net.Dns
 					IsCheckingDisabled = true,
 					IsRecursionDesired = true,
 					EDnsOptions = DnsQueryOptions.DefaultDnsSecQueryOptions.EDnsOptions
-				}, token);
+				}, token).ConfigureAwait(false);
 
 				if ((msg == null) || ((msg.ReturnCode != ReturnCode.NoError) && (msg.ReturnCode != ReturnCode.NxDomain)))
 				{
@@ -169,14 +169,14 @@ namespace DnsToolkit.Net.Dns
 
 				if (cName != null)
 				{
-					DnsSecValidationResult cNameValidationResult = await _validator.ValidateAsync(name, RecordType.CName, recordClass, msg, new List<CNameRecord>() { cName }, resolveLoopProtector, token);
+					DnsSecValidationResult cNameValidationResult = await _validator.ValidateAsync(name, RecordType.CName, recordClass, msg, new List<CNameRecord>() { cName }, resolveLoopProtector, token).ConfigureAwait(false);
 					if ((cNameValidationResult == DnsSecValidationResult.Bogus) || (cNameValidationResult == DnsSecValidationResult.Indeterminate))
 						throw new DnsSecValidationException("CNAME record could not be validated");
 
 					var records = msg.AnswerRecords.Where(x => (x.RecordType == recordType) && (x.RecordClass == recordClass) && x.Name.Equals(cName.CanonicalName)).OfType<T>().ToList();
 					if (records.Count > 0)
 					{
-						DnsSecValidationResult recordsValidationResult = await _validator.ValidateAsync(cName.CanonicalName, recordType, recordClass, msg, records, resolveLoopProtector, token);
+						DnsSecValidationResult recordsValidationResult = await _validator.ValidateAsync(cName.CanonicalName, recordType, recordClass, msg, records, resolveLoopProtector, token).ConfigureAwait(false);
 						if ((recordsValidationResult == DnsSecValidationResult.Bogus) || (recordsValidationResult == DnsSecValidationResult.Indeterminate))
 							throw new DnsSecValidationException("CNAME matching records could not be validated");
 
@@ -186,7 +186,7 @@ namespace DnsToolkit.Net.Dns
 						return new DnsSecResult<T>(records, validationResult);
 					}
 
-					var cNameResults = await ResolveSecureAsyncInternal<T>(cName.CanonicalName, recordType, recordClass, token, resolveLoopProtector);
+					var cNameResults = await ResolveSecureAsyncInternal<T>(cName.CanonicalName, recordType, recordClass, token, resolveLoopProtector).ConfigureAwait(false);
 					validationResult = cNameValidationResult == cNameResults.ValidationResult ? cNameValidationResult : DnsSecValidationResult.Unsigned;
 
 					if (cNameResults.Records.Count > 0)
@@ -197,7 +197,7 @@ namespace DnsToolkit.Net.Dns
 
 				List<T> res = msg.AnswerRecords.Where(x => (x.RecordType == recordType) && (x.RecordClass == recordClass) && x.Name.Equals(name)).OfType<T>().ToList();
 
-				validationResult = await _validator.ValidateAsync(name, recordType, recordClass, msg, res, resolveLoopProtector, token);
+				validationResult = await _validator.ValidateAsync(name, recordType, recordClass, msg, res, resolveLoopProtector, token).ConfigureAwait(false);
 
 				if (validationResult == DnsSecValidationResult.Bogus)
 					throw new DnsSecValidationException("Response records could not be validated");

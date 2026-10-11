@@ -79,7 +79,7 @@ namespace DnsToolkit.Net.Dns
 
 			try
 			{
-				await socket.ConnectAsync(endpointInfo.DestinationAddress, _port, token).AsTask().WithTimeout(queryTimeout, token);
+				await socket.ConnectAsync(endpointInfo.DestinationAddress, _port, token).AsTask().WithTimeout(queryTimeout, token).ConfigureAwait(false);
 
 				return new UdpClientConnection(this, endpointInfo, socket, queryTimeout);
 			}
@@ -126,7 +126,7 @@ namespace DnsToolkit.Net.Dns
 			{
 				try
 				{
-					var sentBytes = await _socket.SendAsync(package.ToArraySegment(false), SocketFlags.None).WithTimeout(_queryTimeout, token);
+					var sentBytes = await _socket.SendAsync(package.ToArraySegment(false), SocketFlags.None).WithTimeout(_queryTimeout, token).ConfigureAwait(false);
 
 					if (sentBytes < package.Length)
 					{
@@ -151,7 +151,7 @@ namespace DnsToolkit.Net.Dns
 				try
 				{
 					receiveTask = _socket.ReceiveAsync(UdpReceiveBuffer.GetReceiveSegment(buffer), SocketFlags.None);
-					var length = await receiveTask.WithTimeout(_queryTimeout, token);
+					var length = await receiveTask.WithTimeout(_queryTimeout, token).ConfigureAwait(false);
 
 					if (length == 0)
 					{
@@ -175,7 +175,7 @@ namespace DnsToolkit.Net.Dns
 			public async Task<DnsReceivedRawPackage?> ReceiveAsync(DnsMessageIdentification identification, CancellationToken token)
 			{
 				DnsReceivedRawPackage? package;
-				while ((package = await ReceiveAsync(token)) != null)
+				while ((package = await ReceiveAsync(token).ConfigureAwait(false)) != null)
 				{
 					if (package.MessageIdentification.Equals(identification))
 						return package;

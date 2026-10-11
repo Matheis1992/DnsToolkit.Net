@@ -142,7 +142,7 @@ namespace DnsToolkit.Net.Dns
 				try
 				{
 					var serverEndpoint = new IPEndPoint(_endpointInfo.DestinationAddress, _transport._port);
-					var sentBytes = await _socket.SendToAsync(package.ToArraySegment(false), SocketFlags.None, serverEndpoint).WithTimeout(_queryTimeout, token);
+					var sentBytes = await _socket.SendToAsync(package.ToArraySegment(false), SocketFlags.None, serverEndpoint).WithTimeout(_queryTimeout, token).ConfigureAwait(false);
 
 					if (sentBytes < package.Length)
 					{
@@ -168,7 +168,7 @@ namespace DnsToolkit.Net.Dns
 				try
 				{
 					receiveTask = _socket.ReceiveFromAsync(UdpReceiveBuffer.GetReceiveSegment(buffer), SocketFlags.None, serverEndpoint);
-					var receiveRes = await receiveTask.WithTimeout(_queryTimeout, token);
+					var receiveRes = await receiveTask.WithTimeout(_queryTimeout, token).ConfigureAwait(false);
 
 					if (receiveRes.ReceivedBytes == 0)
 					{
@@ -192,7 +192,7 @@ namespace DnsToolkit.Net.Dns
 			public async Task<DnsReceivedRawPackage?> ReceiveAsync(DnsMessageIdentification identification, CancellationToken token)
 			{
 				DnsReceivedRawPackage? package;
-				while ((package = await ReceiveAsync(token)) != null)
+				while ((package = await ReceiveAsync(token).ConfigureAwait(false)) != null)
 				{
 					if (package.MessageIdentification.Equals(identification))
 						return package;

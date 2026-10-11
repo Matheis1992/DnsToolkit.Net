@@ -61,6 +61,10 @@ internal sealed class LocalDnsServer : IDisposable
 		var response = query.CreateResponseInstance();
 
 		var answers = _records.Where(r => r.Name.Equals(question.Name) && r.RecordType == question.RecordType).ToList();
+
+		// like an authoritative server, an alias is answered with its CNAME record, which the client follows (RFC 1034, section 3.6.2)
+		if (answers.Count == 0)
+			answers = _records.Where(r => r.Name.Equals(question.Name) && r.RecordType == RecordType.CName).ToList();
 		response.AnswerRecords.AddRange(answers);
 		response.ReturnCode = answers.Count > 0 || _records.Any(r => r.Name.Equals(question.Name)) ? ReturnCode.NoError : ReturnCode.NxDomain;
 

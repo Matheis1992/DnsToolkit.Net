@@ -53,7 +53,7 @@ public abstract class TcpClientTransportBase<TTransport> : PipelinedClientTransp
 
 		try
 		{
-			if (!await client.TryConnectAsync(endpointInfo.DestinationAddress, _port, queryTimeout, token))
+			if (!await client.TryConnectAsync(endpointInfo.DestinationAddress, _port, queryTimeout, token).ConfigureAwait(false))
 			{
 				return null;
 			}
@@ -65,7 +65,7 @@ public abstract class TcpClientTransportBase<TTransport> : PipelinedClientTransp
 				if (queryTimeout > 0)
 					setupCts.CancelAfter(queryTimeout);
 
-				stream = await GetStreamAsync(client, setupCts.Token);
+				stream = await GetStreamAsync(client, setupCts.Token).ConfigureAwait(false);
 			}
 
 			if (stream == null)
@@ -110,7 +110,7 @@ public abstract class TcpClientTransportBase<TTransport> : PipelinedClientTransp
 				try
 				{
 					// serialized by the message stream, as several queries share the connection
-					await _messageStream.WriteMessageAsync(package.ToArraySegment(true), token);
+					await _messageStream.WriteMessageAsync(package.ToArraySegment(true), token).ConfigureAwait(false);
 				}
 				catch
 				{
@@ -126,7 +126,7 @@ public abstract class TcpClientTransportBase<TTransport> : PipelinedClientTransp
 			try
 			{
 				// the timeout of a query is handled by the caller using the token
-				var message = await _messageStream.ReadMessageAsync(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan, token);
+				var message = await _messageStream.ReadMessageAsync(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan, token).ConfigureAwait(false);
 
 				if (message == null)
 				{
@@ -146,7 +146,7 @@ public abstract class TcpClientTransportBase<TTransport> : PipelinedClientTransp
 		public async Task<DnsReceivedRawPackage?> ReceiveAsync(DnsMessageIdentification identification, CancellationToken token)
 		{
 			DnsReceivedRawPackage? package;
-			while ((package = await ReceiveAsync(token)) != null)
+			while ((package = await ReceiveAsync(token).ConfigureAwait(false)) != null)
 			{
 				if (package.MessageIdentification.Equals(identification))
 					return package;

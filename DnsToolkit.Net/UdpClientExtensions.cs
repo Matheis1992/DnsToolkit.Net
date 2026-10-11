@@ -33,7 +33,7 @@ namespace DnsToolkit.Net
 			var connectTask = udpClient.ReceiveAsync();
 			var timeoutTask = Task.Delay(timeout, token);
 
-			await Task.WhenAny(connectTask, timeoutTask);
+			await Task.WhenAny(connectTask, timeoutTask).ConfigureAwait(false);
 
 			if (connectTask.IsCompleted)
 				return connectTask.Result;

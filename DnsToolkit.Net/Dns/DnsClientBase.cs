@@ -148,12 +148,12 @@ namespace DnsToolkit.Net.Dns
 
 				try
 				{
-					connection = await connectionTask;
+					connection = await connectionTask.ConfigureAwait(false);
 
 					if (connection == null)
 						continue;
 
-					var receivedMessage = await SendMessageAsync<TMessage>(package, connection, tsigKeySelector, tsigOriginalMac, token);
+					var receivedMessage = await SendMessageAsync<TMessage>(package, connection, tsigKeySelector, tsigOriginalMac, token).ConfigureAwait(false);
 
 					if ((receivedMessage != null) && ValidateResponse(query, receivedMessage.Message))
 					{
@@ -172,7 +172,7 @@ namespace DnsToolkit.Net.Dns
 
 						if (resendTransport != null)
 						{
-							using (var resendConnection = await resendTransport.ConnectAsync(new DnsClientEndpointInfo(false, receivedMessage.ResponderAddress.Address, receivedMessage.LocalAddress.Address), QueryTimeout, token))
+							using (var resendConnection = await resendTransport.ConnectAsync(new DnsClientEndpointInfo(false, receivedMessage.ResponderAddress.Address, receivedMessage.LocalAddress.Address), QueryTimeout, token).ConfigureAwait(false))
 							{
 								if (resendConnection == null)
 								{
@@ -180,7 +180,7 @@ namespace DnsToolkit.Net.Dns
 								}
 								else
 								{
-									var resendResponse = await SendMessageAsync<TMessage>(package, resendConnection, tsigKeySelector, tsigOriginalMac, token);
+									var resendResponse = await SendMessageAsync<TMessage>(package, resendConnection, tsigKeySelector, tsigOriginalMac, token).ConfigureAwait(false);
 
 									if ((resendResponse != null)
 									    && ValidateResponse(query, resendResponse.Message)
@@ -259,7 +259,7 @@ namespace DnsToolkit.Net.Dns
 
 			try
 			{
-				return await SendMessageAsync<TMessage>(package, connection, tsigKeySelector, tsigOriginalMac, timeoutCts);
+				return await SendMessageAsync<TMessage>(package, connection, tsigKeySelector, tsigOriginalMac, timeoutCts).ConfigureAwait(false);
 			}
 			catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !token.IsCancellationRequested)
 			{
@@ -277,10 +277,10 @@ namespace DnsToolkit.Net.Dns
 		{
 			var token = timeoutCts.Token;
 
-			if (!await connection.SendAsync(package, token))
+			if (!await connection.SendAsync(package, token).ConfigureAwait(false))
 				return null;
 
-			var resultData = await connection.ReceiveAsync(package.MessageIdentification, token);
+			var resultData = await connection.ReceiveAsync(package.MessageIdentification, token).ConfigureAwait(false);
 
 			if (resultData == null)
 				return null;
@@ -295,7 +295,7 @@ namespace DnsToolkit.Net.Dns
 				if (QueryTimeout > 0)
 					timeoutCts.CancelAfter(QueryTimeout);
 
-				resultData = await connection.ReceiveAsync(package.MessageIdentification, token);
+				resultData = await connection.ReceiveAsync(package.MessageIdentification, token).ConfigureAwait(false);
 
 				if (resultData == null)
 					return null;
@@ -336,7 +336,7 @@ namespace DnsToolkit.Net.Dns
 
 			var tasks = _endpointInfos.Select(x => SendMessageParallelAsync(multicastTransport, x, message, package, tsigKeySelector, tsigOriginalMac, results, timeoutCts.Token)).ToArray();
 
-			await Task.WhenAll(tasks);
+			await Task.WhenAll(tasks).ConfigureAwait(false);
 
 			return results.ToList();
 		}
@@ -344,12 +344,12 @@ namespace DnsToolkit.Net.Dns
 		private async Task SendMessageParallelAsync<TMessage>(IClientTransport transport, DnsClientEndpointInfo endpointInfo, TMessage query, DnsRawPackage package, SelectTsigKey? tsigKeySelector, byte[]? tsigOriginalMac, BlockingCollection<TMessage> results, CancellationToken token)
 			where TMessage : DnsMessageBase, new()
 		{
-			using (var connection = await transport.ConnectAsync(endpointInfo, QueryTimeout, token))
+			using (var connection = await transport.ConnectAsync(endpointInfo, QueryTimeout, token).ConfigureAwait(false))
 			{
 				if (connection == null)
 					return;
 
-				if (!await connection.SendAsync(package, token))
+				if (!await connection.SendAsync(package, token).ConfigureAwait(false))
 					return;
 
 				var resendTasks = new List<Task>();
@@ -359,7 +359,7 @@ namespace DnsToolkit.Net.Dns
 					if (token.IsCancellationRequested)
 						break;
 
-					var response = await connection.ReceiveAsync(package.MessageIdentification, token);
+					var response = await connection.ReceiveAsync(package.MessageIdentification, token).ConfigureAwait(false);
 
 					// The connection only returns null on timeout or failure, retrying would result in a busy loop
 					if (response == null)
@@ -395,7 +395,7 @@ namespace DnsToolkit.Net.Dns
 				}
 
 				// The results of the resent queries have to be in the result list
-				await Task.WhenAll(resendTasks);
+				await Task.WhenAll(resendTasks).ConfigureAwait(false);
 			}
 		}
 
@@ -409,9 +409,9 @@ namespace DnsToolkit.Net.Dns
 
 			try
 			{
-				connection = await transport.ConnectAsync(endpointInfo, QueryTimeout, token);
+				connection = await transport.ConnectAsync(endpointInfo, QueryTimeout, token).ConfigureAwait(false);
 
-				var response = await SendMessageAsync<TMessage>(package, connection!, tsigKeySelector, tsigOriginalMac, token);
+				var response = await SendMessageAsync<TMessage>(package, connection!, tsigKeySelector, tsigOriginalMac, token).ConfigureAwait(false);
 
 				if ((response != null)
 				    && ValidateResponse(query, response.Message))

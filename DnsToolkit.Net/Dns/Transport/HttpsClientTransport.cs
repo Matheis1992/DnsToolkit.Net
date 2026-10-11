@@ -95,7 +95,7 @@ public class HttpsClientTransport : IClientTransport
 			var content = new ByteArrayContent(package.ToArraySegment(false).ToArray());
 			content.Headers.ContentType = new MediaTypeHeaderValue("application/dns-message");
 
-			var response = await _client.PostAsync(_uri, content, token);
+			var response = await _client.PostAsync(_uri, content, token).ConfigureAwait(false);
 
 			if (!response.IsSuccessStatusCode)
 				return false;
@@ -104,7 +104,7 @@ public class HttpsClientTransport : IClientTransport
 			ms.WriteByte(0);
 			ms.WriteByte(0);
 
-			await response.Content.CopyToAsync(ms, token);
+			await response.Content.CopyToAsync(ms, token).ConfigureAwait(false);
 
 			var buffer = ms.ToArray();
 			DnsMessageBase.EncodeUShort(buffer, 0, (ushort) (buffer.Length - 2));

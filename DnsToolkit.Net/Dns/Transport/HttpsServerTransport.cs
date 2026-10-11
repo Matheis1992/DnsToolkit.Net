@@ -156,7 +156,7 @@ public class HttpsServerTransport : IAsyncClosableServerTransport, IAsyncDisposa
 		if (!connectionQueue.Writer.TryWrite(connection))
 			throw new EndpointRouteBuilderExtensions.ServiceUnavailableException();
 
-		return await tcs.Task.WaitAsync(token);
+		return await tcs.Task.WaitAsync(token).ConfigureAwait(false);
 	}
 
 	/// <summary>
@@ -315,7 +315,7 @@ public class HttpsServerTransport : IAsyncClosableServerTransport, IAsyncDisposa
 	{
 		var connectionQueue = Volatile.Read(ref _run)?.ConnectionQueue ?? throw new InvalidOperationException("The transport is not bound");
 
-		await connectionQueue.Reader.WaitToReadAsync(token);
+		await connectionQueue.Reader.WaitToReadAsync(token).ConfigureAwait(false);
 		return connectionQueue.Reader.TryRead(out var connection) ? connection : null;
 	}
 

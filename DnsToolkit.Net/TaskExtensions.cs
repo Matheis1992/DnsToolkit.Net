@@ -24,7 +24,7 @@ namespace DnsToolkit.Net
 		{
 			try
 			{
-				return await task.WaitAsync(TimeSpan.FromMilliseconds(timeout), token);
+				return await task.WaitAsync(TimeSpan.FromMilliseconds(timeout), token).ConfigureAwait(false);
 			}
 			catch (TimeoutException)
 			{
@@ -36,7 +36,7 @@ namespace DnsToolkit.Net
 		{
 			try
 			{
-				await task.WaitAsync(TimeSpan.FromMilliseconds(timeout), token);
+				await task.WaitAsync(TimeSpan.FromMilliseconds(timeout), token).ConfigureAwait(false);
 			}
 			catch (TimeoutException)
 			{

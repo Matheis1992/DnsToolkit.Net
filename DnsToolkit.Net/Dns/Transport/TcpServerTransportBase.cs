@@ -103,7 +103,7 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 
 			try
 			{
-				client = await _tcpListener.AcceptTcpClientAsync(token);
+				client = await _tcpListener.AcceptTcpClientAsync(token).ConfigureAwait(false);
 			}
 			catch (SocketException ex) when (ex.SocketErrorCode is SocketError.ConnectionReset or SocketError.ConnectionAborted)
 			{
@@ -179,7 +179,7 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 		/// </summary>
 		public async Task<bool> InitializeAsync(CancellationToken token)
 		{
-			var stream = await GetStreamFromClientAsync(token);
+			var stream = await GetStreamFromClientAsync(token).ConfigureAwait(false);
 			if (stream == null)
 				return false;
 
@@ -213,7 +213,7 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 				byte[]? message;
 				try
 				{
-					message = await read.WaitAsync(token);
+					message = await read.WaitAsync(token).ConfigureAwait(false);
 				}
 				catch (OperationCanceledException) when (token.IsCancellationRequested)
 				{
@@ -245,7 +245,7 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 			try
 			{
 				// serialized by the message stream, as responses to pipelined queries are sent concurrently
-				await _messageStream.WriteMessageAsync(package.ToArraySegment(true), token);
+				await _messageStream.WriteMessageAsync(package.ToArraySegment(true), token).ConfigureAwait(false);
 				return true;
 			}
 			catch

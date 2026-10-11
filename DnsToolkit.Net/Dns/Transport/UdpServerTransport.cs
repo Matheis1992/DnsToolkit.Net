@@ -201,10 +201,10 @@ public class UdpServerTransport : IServerTransport
 #if NETSTANDARD2_0
 				// this receive cannot be cancelled, so only the waiting is cancelled
 				receiveTask = socket.ReceiveMessageFromAsync(UdpReceiveBuffer.GetReceiveSegment(buffer), SocketFlags.None, _anyEndPoint);
-				var result = await receiveTask.WaitAsync(token);
+				var result = await receiveTask.WaitAsync(token).ConfigureAwait(false);
 #else
 				receiveTask = socket.ReceiveMessageFromAsync(UdpReceiveBuffer.GetReceiveSegment(buffer), SocketFlags.None, _anyEndPoint, token).AsTask();
-				var result = await receiveTask;
+				var result = await receiveTask.ConfigureAwait(false);
 #endif
 
 				return new UdpServerConnection(
@@ -278,7 +278,7 @@ public class UdpServerTransport : IServerTransport
 		{
 			try
 			{
-				var sentBytes = await _socket.SendToAsync(package.ToArraySegment(false), SocketFlags.None, _receivedRawPackage.RemoteEndpoint, token).AsTask().WithTimeout(_timeout, token);
+				var sentBytes = await _socket.SendToAsync(package.ToArraySegment(false), SocketFlags.None, _receivedRawPackage.RemoteEndpoint, token).AsTask().WithTimeout(_timeout, token).ConfigureAwait(false);
 
 				return sentBytes == package.Length;
 			}

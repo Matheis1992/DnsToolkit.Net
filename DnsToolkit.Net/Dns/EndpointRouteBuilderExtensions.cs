@@ -60,14 +60,14 @@ public static class EndpointRouteBuilderExtensions
 		}
 		catch
 		{
-			await Results.StatusCode((int) HttpStatusCode.UnprocessableEntity).ExecuteAsync(ctx);
+			await Results.StatusCode((int) HttpStatusCode.UnprocessableEntity).ExecuteAsync(ctx).ConfigureAwait(false);
 			return null;
 		}
 
 		DnsMessageBase? dnsResponse = null;
 		try
 		{
-			dnsResponse = await handler(dnsQuery, ctx, token);
+			dnsResponse = await handler(dnsQuery, ctx, token).ConfigureAwait(false);
 		}
 		catch
 		{
@@ -104,7 +104,7 @@ public static class EndpointRouteBuilderExtensions
 
 			if (String.IsNullOrEmpty(queryText))
 			{
-				await Results.BadRequest().ExecuteAsync(ctx);
+				await Results.BadRequest().ExecuteAsync(ctx).ConfigureAwait(false);
 				return;
 			}
 
@@ -116,7 +116,7 @@ public static class EndpointRouteBuilderExtensions
 			}
 			catch
 			{
-				await Results.BadRequest().ExecuteAsync(ctx);
+				await Results.BadRequest().ExecuteAsync(ctx).ConfigureAwait(false);
 				return;
 			}
 
@@ -126,7 +126,7 @@ public static class EndpointRouteBuilderExtensions
 		{
 			if (ctx.Request.ContentLength > _MAX_MESSAGE_SIZE)
 			{
-				await Results.StatusCode((int) HttpStatusCode.RequestEntityTooLarge).ExecuteAsync(ctx);
+				await Results.StatusCode((int) HttpStatusCode.RequestEntityTooLarge).ExecuteAsync(ctx).ConfigureAwait(false);
 				return;
 			}
 
@@ -143,11 +143,11 @@ public static class EndpointRouteBuilderExtensions
 
 			try
 			{
-				await ctx.Request.Body.CopyToAsync(ms, token);
+				await ctx.Request.Body.CopyToAsync(ms, token).ConfigureAwait(false);
 			}
 			catch (BadHttpRequestException ex) when (ex.StatusCode == (int) HttpStatusCode.RequestEntityTooLarge)
 			{
-				await Results.StatusCode((int) HttpStatusCode.RequestEntityTooLarge).ExecuteAsync(ctx);
+				await Results.StatusCode((int) HttpStatusCode.RequestEntityTooLarge).ExecuteAsync(ctx).ConfigureAwait(false);
 				return;
 			}
 
@@ -157,20 +157,20 @@ public static class EndpointRouteBuilderExtensions
 		}
 		else
 		{
-			await Results.StatusCode((int) HttpStatusCode.MethodNotAllowed).ExecuteAsync(ctx);
+			await Results.StatusCode((int) HttpStatusCode.MethodNotAllowed).ExecuteAsync(ctx).ConfigureAwait(false);
 			return;
 		}
 
 		if (contentType != _DOH_CONTENT_TYPE)
 		{
-			await Results.StatusCode((int) HttpStatusCode.UnsupportedMediaType).ExecuteAsync(ctx);
+			await Results.StatusCode((int) HttpStatusCode.UnsupportedMediaType).ExecuteAsync(ctx).ConfigureAwait(false);
 			return;
 		}
 
 		// the content contains the two bytes of the length header
 		if (content.Length - 2 > _MAX_MESSAGE_SIZE)
 		{
-			await Results.StatusCode((int) HttpStatusCode.RequestEntityTooLarge).ExecuteAsync(ctx);
+			await Results.StatusCode((int) HttpStatusCode.RequestEntityTooLarge).ExecuteAsync(ctx).ConfigureAwait(false);
 			return;
 		}
 
@@ -190,25 +190,25 @@ public static class EndpointRouteBuilderExtensions
 		DnsRawPackage? response;
 		try
 		{
-			response = await handler(receivedPackage, ctx, token);
+			response = await handler(receivedPackage, ctx, token).ConfigureAwait(false);
 		}
 		catch (ServiceUnavailableException)
 		{
 			// the client can retry immediately, e.g. with another server
-			await Results.StatusCode((int) HttpStatusCode.ServiceUnavailable).ExecuteAsync(ctx);
+			await Results.StatusCode((int) HttpStatusCode.ServiceUnavailable).ExecuteAsync(ctx).ConfigureAwait(false);
 			return;
 		}
 
 		if (response == null)
 		{
-			await Results.StatusCode((int) HttpStatusCode.InternalServerError).ExecuteAsync(ctx);
+			await Results.StatusCode((int) HttpStatusCode.InternalServerError).ExecuteAsync(ctx).ConfigureAwait(false);
 		}
 		else
 		{
 			ctx.Response.ContentType = _DOH_CONTENT_TYPE;
 			ctx.Response.ContentLength = response.Length;
 			ctx.Response.StatusCode = (int) HttpStatusCode.OK;
-			await ctx.Response.Body.WriteAsync(response.ToArraySegment(false), token);
+			await ctx.Response.Body.WriteAsync(response.ToArraySegment(false), token).ConfigureAwait(false);
 		}
 	}
 }

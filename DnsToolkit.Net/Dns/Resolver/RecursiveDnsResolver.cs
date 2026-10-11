@@ -130,7 +130,7 @@ namespace DnsToolkit.Net.Dns
 				{
 					IsRecursionDesired = false,
 					EDnsOptions = DnsQueryOptions.DefaultQueryOptions.EDnsOptions
-				}, token);
+				}, token).ConfigureAwait(false);
 
 				if ((msg != null) && ((msg.ReturnCode == ReturnCode.NoError) || (msg.ReturnCode == ReturnCode.NxDomain)))
 				{
@@ -165,7 +165,7 @@ namespace DnsToolkit.Net.Dns
 							{
 								NsRecord firstReferal = referalRecords.First();
 
-								var newLookedUpServers = await ResolveHostWithTtlAsync(firstReferal.NameServer, state, token);
+								var newLookedUpServers = await ResolveHostWithTtlAsync(firstReferal.NameServer, state, token).ConfigureAwait(false);
 
 								foreach (var newServer in newLookedUpServers)
 								{
@@ -200,10 +200,10 @@ namespace DnsToolkit.Net.Dns
 				if (_cache.TryGetRecords(name, RecordType.CName, recordClass, out List<CNameRecord>? cachedCNames))
 				{
 					var canonicalName = cachedCNames!.First().CanonicalName;
-					return await ResolveAsyncInternal<T>(canonicalName, recordType, recordClass, context, token);
+					return await ResolveAsyncInternal<T>(canonicalName, recordType, recordClass, context, token).ConfigureAwait(false);
 				}
 
-				DnsMessage msg = await ResolveMessageAsync(name, recordType, recordClass, context, token);
+				DnsMessage msg = await ResolveMessageAsync(name, recordType, recordClass, context, token).ConfigureAwait(false);
 
 				// check for cname
 				List<DnsRecordBase> cNameRecords = msg.AnswerRecords.Where(x => (x.RecordType == RecordType.CName) && (x.RecordClass == recordClass) && x.Name.Equals(name)).ToList();
@@ -220,7 +220,7 @@ namespace DnsToolkit.Net.Dns
 						return matchingAdditionalRecords.OfType<T>().ToList();
 					}
 
-					return await ResolveAsyncInternal<T>(canonicalName, recordType, recordClass, context, token);
+					return await ResolveAsyncInternal<T>(canonicalName, recordType, recordClass, context, token).ConfigureAwait(false);
 				}
 
 				// check for "normal" answer
@@ -254,10 +254,10 @@ namespace DnsToolkit.Net.Dns
 		{
 			List<Tuple<IPAddress, int>> result = new List<Tuple<IPAddress, int>>();
 
-			var aaaaRecords = await ResolveAsyncInternal<AaaaRecord>(name, RecordType.Aaaa, RecordClass.INet, state, token);
+			var aaaaRecords = await ResolveAsyncInternal<AaaaRecord>(name, RecordType.Aaaa, RecordClass.INet, state, token).ConfigureAwait(false);
 			result.AddRange(aaaaRecords.Select(x => new Tuple<IPAddress, int>(x.Address, x.TimeToLive)));
 
-			var aRecords = await ResolveAsyncInternal<ARecord>(name, RecordType.A, RecordClass.INet, state, token);
+			var aRecords = await ResolveAsyncInternal<ARecord>(name, RecordType.A, RecordClass.INet, state, token).ConfigureAwait(false);
 			result.AddRange(aRecords.Select(x => new Tuple<IPAddress, int>(x.Address, x.TimeToLive)));
 
 			return result;
