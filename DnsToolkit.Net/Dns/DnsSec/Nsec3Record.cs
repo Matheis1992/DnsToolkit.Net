@@ -130,7 +130,7 @@ namespace DnsToolkit.Net.Dns
 			       + " " + (byte) Flags
 			       + " " + Iterations
 			       + " " + ((Salt.Length == 0) ? "-" : Salt.ToBase16String())
-			       + " " + NextHashedOwner.ToBase32String()
+			       + " " + NextHashedOwner.ToBase32HexString()
 			       + " " + String.Join(" ", Types.Select(RecordTypeHelper.ToShortString));
 		}
 
@@ -152,7 +152,7 @@ namespace DnsToolkit.Net.Dns
 
 		internal bool IsCovering(DomainName name)
 		{
-			DomainName nextDomainName = new DomainName(NextHashedOwner.ToBase32String(), name.GetParentName());
+			DomainName nextDomainName = new DomainName(NextHashedOwner.ToBase32HexString(), name.GetParentName());
 
 			if (Name.CompareTo(nextDomainName) < 0)
 			{

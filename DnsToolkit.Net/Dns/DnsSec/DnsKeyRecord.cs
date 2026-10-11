@@ -34,6 +34,7 @@ using Org.BouncyCastle.Math;
 using Org.BouncyCastle.Math.EC;
 using Org.BouncyCastle.Pkcs;
 using Org.BouncyCastle.Security;
+using Org.BouncyCastle.Utilities;
 using static Org.BouncyCastle.Asn1.Cmp.Challenge;
 
 namespace DnsToolkit.Net.Dns
@@ -299,8 +300,9 @@ namespace DnsToolkit.Net.Dns
 
 			byte[] res = new byte[digestSize * 2];
 
-			signature[0].ToByteArrayUnsigned().CopyTo(res, 0);
-			signature[1].ToByteArrayUnsigned().CopyTo(res, digestSize);
+			// r and s have a fixed length (RFC 6605), a value starting with zero bytes is padded
+			BigIntegers.AsUnsignedByteArray(digestSize, signature[0]).CopyTo(res, 0);
+			BigIntegers.AsUnsignedByteArray(digestSize, signature[1]).CopyTo(res, digestSize);
 
 			return res;
 		}
@@ -308,7 +310,8 @@ namespace DnsToolkit.Net.Dns
 		private byte[] SignEd25519(byte[] buffer, int length)
 		{
 			Ed25519Signer signer = new Ed25519Signer();
-			signer.Init(true, new ParametersWithRandom(PrivateKeyFactory.CreateKey(PrivateKey), _secureRandom));
+			// Ed25519 signatures are deterministic, the signer takes no random source
+			signer.Init(true, PrivateKeyFactory.CreateKey(PrivateKey));
 
 			signer.BlockUpdate(buffer, 0, length);
 			return signer.GenerateSignature();
@@ -317,7 +320,8 @@ namespace DnsToolkit.Net.Dns
 		private byte[] SignEd448(byte[] buffer, int length)
 		{
 			Ed448Signer signer = new Ed448Signer(Array.Empty<byte>());
-			signer.Init(true, new ParametersWithRandom(PrivateKeyFactory.CreateKey(PrivateKey), _secureRandom));
+			// Ed448 signatures are deterministic, the signer takes no random source
+			signer.Init(true, PrivateKeyFactory.CreateKey(PrivateKey));
 
 			signer.BlockUpdate(buffer, 0, length);
 			return signer.GenerateSignature();
@@ -531,8 +535,9 @@ namespace DnsToolkit.Net.Dns
 
 					publicKey = new byte[ecDsaDigestSize * 2];
 
-					ecDsaPublicKey.Q.AffineXCoord.ToBigInteger().ToByteArrayUnsigned().CopyTo(publicKey, 0);
-					ecDsaPublicKey.Q.AffineYCoord.ToBigInteger().ToByteArrayUnsigned().CopyTo(publicKey, ecDsaDigestSize);
+					// X and Y have a fixed length (RFC 6605), a value starting with zero bytes is padded
+					BigIntegers.AsUnsignedByteArray(ecDsaDigestSize, ecDsaPublicKey.Q.AffineXCoord.ToBigInteger()).CopyTo(publicKey, 0);
+					BigIntegers.AsUnsignedByteArray(ecDsaDigestSize, ecDsaPublicKey.Q.AffineYCoord.ToBigInteger()).CopyTo(publicKey, ecDsaDigestSize);
 					break;
 
 				case DnsSecAlgorithm.Ed25519:
