@@ -97,8 +97,10 @@ namespace DnsToolkit.Net.Dns
 				{
 					DomainName zoneApex = rrSigRecords.OrderByDescending(x => x.Labels).First().SignersName;
 
-					var nonExistenceValidation = await ValidateNonExistenceAsync(name, RecordType.Ds, recordClass, rrSigRecords, name, zoneApex, msg, state, budget, token).ConfigureAwait(false);
-					if ((nonExistenceValidation != DnsSecValidationResult.Bogus) && (nonExistenceValidation != DnsSecValidationResult.Indeterminate))
+					// No name inside of a signed zone has a DS record, so only the proof of a delegation without DS records
+					// makes the name insecure. Otherwise, an answer of a signed zone, whose signatures were stripped, would be
+					// insecure instead of bogus.
+					if (await ValidateInsecureDelegationAsync(name, recordClass, rrSigRecords, zoneApex, msg, state, budget, token).ConfigureAwait(false))
 						return true;
 				}
 
@@ -106,6 +108,49 @@ namespace DnsToolkit.Net.Dns
 			}
 
 			return false;
+		}
+
+		/// <summary>
+		///   Validates the proof, that the name is a delegation without DS records (RFC 4035, section 5.2, and RFC 5155,
+		///   section 8.6): the NSEC or NSEC3 record of the name has the NS bit, but neither the DS nor the SOA bit, or an
+		///   NSEC3 record with the opt-out flag covers the hash of the name
+		/// </summary>
+		private async Task<bool> ValidateInsecureDelegationAsync(DomainName name, RecordClass recordClass, List<RrSigRecord> rrSigRecords, DomainName zoneApex, DnsMessage msg, TState state, DnsSecValidationBudget budget, CancellationToken token)
+		{
+			static bool IsInsecureDelegation(List<RecordType> types) => types.Contains(RecordType.Ns) && !types.Contains(RecordType.Ds) && !types.Contains(RecordType.Soa);
+
+			List<NSecRecord> nsecRecords = msg.AuthorityRecords.OfType<NSecRecord>().ToList();
+
+			if (nsecRecords.Count != 0)
+			{
+				if (await ValidateRrSigsPerOwnerAsync(nsecRecords, RecordType.NSec, recordClass, rrSigRecords, zoneApex, msg, state, budget, token).ConfigureAwait(false) != DnsSecValidationResult.Signed)
+					return false;
+
+				NSecRecord? nsecRecord = nsecRecords.FirstOrDefault(x => x.Name.Equals(name));
+				return (nsecRecord != null) && IsInsecureDelegation(nsecRecord.Types);
+			}
+
+			List<NSec3Record> nsec3Records = msg.AuthorityRecords.OfType<NSec3Record>().Where(x => ((x.Flags == NSec3Flags.None) || (x.Flags == NSec3Flags.OptOut)) && x.Name.GetParentName().Equals(zoneApex)).ToList();
+
+			NSec3Record? nsec3Parameter = GetNSec3Parameter(nsec3Records);
+			if (nsec3Parameter == null)
+				return false;
+
+			if (await ValidateRrSigsPerOwnerAsync(nsec3Records, RecordType.NSec3, recordClass, rrSigRecords, zoneApex, msg, state, budget, token).ConfigureAwait(false) != DnsSecValidationResult.Signed)
+				return false;
+
+			// Treated as insecure like recommended in RFC 9276, but only after the signatures of the NSEC3 records were validated above
+			if (nsec3Parameter.Iterations > _limits.MaxNSec3Iterations)
+				return true;
+
+			budget.ConsumeNSec3HashComputation();
+			DomainName hashedName = name.GetNSec3HashName(nsec3Parameter.HashAlgorithm, nsec3Parameter.Iterations, nsec3Parameter.Salt, zoneApex);
+
+			NSec3Record? directMatch = nsec3Records.FirstOrDefault(x => x.Name.Equals(hashedName));
+			if (directMatch != null)
+				return IsInsecureDelegation(directMatch.Types);
+
+			return nsec3Records.Any(x => x.Flags.HasFlag(NSec3Flags.OptOut) && x.IsCovering(hashedName));
 		}
 
 		private async Task<DnsSecValidationResult> ValidateNonExistenceAsync(DomainName name, RecordType recordType, RecordClass recordClass, List<RrSigRecord> rrSigRecords, DomainName stop, DomainName zoneApex, DnsMessage msg, TState state, DnsSecValidationBudget budget, CancellationToken token)
@@ -134,13 +179,9 @@ namespace DnsToolkit.Net.Dns
 			if (nsecRecords.Count == 0)
 				return DnsSecValidationResult.Indeterminate;
 
-			foreach (var nsecGroup in nsecRecords.GroupBy(x => x.Name))
-			{
-				DnsSecValidationResult validationResult = await ValidateRrSigAsync(nsecGroup.Key, RecordType.NSec, recordClass, nsecGroup.ToList(), rrSigRecords, zoneApex, msg, state, budget, token).ConfigureAwait(false);
-
-				if (validationResult != DnsSecValidationResult.Signed)
-					return validationResult;
-			}
+			DnsSecValidationResult validationResult = await ValidateRrSigsPerOwnerAsync(nsecRecords, RecordType.NSec, recordClass, rrSigRecords, zoneApex, msg, state, budget, token).ConfigureAwait(false);
+			if (validationResult != DnsSecValidationResult.Signed)
+				return validationResult;
 
 			DomainName current = name;
 
@@ -174,13 +215,9 @@ namespace DnsToolkit.Net.Dns
 			if (nsecRecords.Count == 0)
 				return DnsSecValidationResult.Indeterminate;
 
-			foreach (var nsecGroup in nsecRecords.GroupBy(x => x.Name))
-			{
-				DnsSecValidationResult validationResult = await ValidateRrSigAsync(nsecGroup.Key, RecordType.NSec3, recordClass, nsecGroup.ToList(), rrSigRecords, zoneApex, msg, state, budget, token).ConfigureAwait(false);
-
-				if (validationResult != DnsSecValidationResult.Signed)
-					return validationResult;
-			}
+			DnsSecValidationResult validationResult = await ValidateRrSigsPerOwnerAsync(nsecRecords, RecordType.NSec3, recordClass, rrSigRecords, zoneApex, msg, state, budget, token).ConfigureAwait(false);
+			if (validationResult != DnsSecValidationResult.Signed)
+				return validationResult;
 
 			var nsec3Parameter = nsecRecords.Where(x => x.Name.GetParentName().Equals(zoneApex)).Where(x => x.HashAlgorithm.IsSupported()).Select(x => new { x.HashAlgorithm, x.Iterations, x.Salt }).OrderBy(x => x.HashAlgorithm.GetPriority()).First();
 
@@ -256,12 +293,93 @@ namespace DnsToolkit.Net.Dns
 					    || ((name.Labels[0] == "*") && (record.Labels == name.LabelCount - 1)))
 						return DnsSecValidationResult.Signed;
 
-					if (await ValidateNonExistenceAsync(name, recordType, recordClass, rrSigRecords, DomainName.Asterisk + record.Name.GetParentName(record.Name.LabelCount - record.Labels), zoneApex, msg, state, budget, token).ConfigureAwait(false) == DnsSecValidationResult.Signed)
+					// an answer expanded from a wildcard is only valid with the proof, that no closer name exists
+					res = await ValidateWildcardExpansionAsync(name, record.Labels, recordClass, rrSigRecords, record.SignersName, msg, state, budget, token).ConfigureAwait(false);
+					if (res == DnsSecValidationResult.Signed)
 						return DnsSecValidationResult.Signed;
 				}
 			}
 
 			return res;
+		}
+
+		/// <summary>
+		///   Validates the proof, that the answer for the name was expanded from the wildcard of the closest encloser given by
+		///   the labels of the signature (RFC 4035, section 5.3.4, and RFC 5155, section 8.8): neither the name nor the next
+		///   closer name, which is the closest encloser plus the next label of the name, exists
+		/// </summary>
+		private async Task<DnsSecValidationResult> ValidateWildcardExpansionAsync(DomainName name, int signatureLabels, RecordClass recordClass, List<RrSigRecord> rrSigRecords, DomainName zoneApex, DnsMessage msg, TState state, DnsSecValidationBudget budget, CancellationToken token)
+		{
+			DomainName closestEncloser = name.GetParentName(name.LabelCount - signatureLabels);
+			DomainName nextCloser = name.GetParentName(name.LabelCount - signatureLabels - 1);
+
+			if (!closestEncloser.IsEqualOrSubDomainOf(zoneApex))
+				return DnsSecValidationResult.Bogus;
+
+			List<NSecRecord> nsecRecords = msg.AuthorityRecords.OfType<NSecRecord>().ToList();
+
+			if (nsecRecords.Count != 0)
+			{
+				if (await ValidateRrSigsPerOwnerAsync(nsecRecords, RecordType.NSec, recordClass, rrSigRecords, zoneApex, msg, state, budget, token).ConfigureAwait(false) != DnsSecValidationResult.Signed)
+					return DnsSecValidationResult.Bogus;
+
+				// A closer name, which exists, is the owner or the next name of every NSEC record covering the name, or a
+				// parent of them. So they share no more labels with the name than the closest encloser.
+				return nsecRecords.Any(x => x.IsCovering(name, zoneApex)
+				                            && (Math.Max(GetCommonLabelCount(name, x.Name), GetCommonLabelCount(name, x.NextDomainName)) == closestEncloser.LabelCount))
+					? DnsSecValidationResult.Signed
+					: DnsSecValidationResult.Bogus;
+			}
+
+			List<NSec3Record> nsec3Records = msg.AuthorityRecords.OfType<NSec3Record>().Where(x => ((x.Flags == NSec3Flags.None) || (x.Flags == NSec3Flags.OptOut)) && x.Name.GetParentName().Equals(zoneApex)).ToList();
+
+			NSec3Record? nsec3Parameter = GetNSec3Parameter(nsec3Records);
+			if (nsec3Parameter == null)
+				return DnsSecValidationResult.Bogus;
+
+			if (await ValidateRrSigsPerOwnerAsync(nsec3Records, RecordType.NSec3, recordClass, rrSigRecords, zoneApex, msg, state, budget, token).ConfigureAwait(false) != DnsSecValidationResult.Signed)
+				return DnsSecValidationResult.Bogus;
+
+			// Treated as insecure like recommended in RFC 9276, but only after the signatures of the NSEC3 records were validated above
+			if (nsec3Parameter.Iterations > _limits.MaxNSec3Iterations)
+				return DnsSecValidationResult.Unsigned;
+
+			budget.ConsumeNSec3HashComputation();
+			DomainName hashedNextCloser = nextCloser.GetNSec3HashName(nsec3Parameter.HashAlgorithm, nsec3Parameter.Iterations, nsec3Parameter.Salt, zoneApex);
+
+			return nsec3Records.Any(x => x.IsCovering(hashedNextCloser)) ? DnsSecValidationResult.Signed : DnsSecValidationResult.Bogus;
+		}
+
+		private async Task<DnsSecValidationResult> ValidateRrSigsPerOwnerAsync<TRecord>(List<TRecord> records, RecordType recordType, RecordClass recordClass, List<RrSigRecord> rrSigRecords, DomainName zoneApex, DnsMessage msg, TState state, DnsSecValidationBudget budget, CancellationToken token)
+			where TRecord : DnsRecordBase
+		{
+			foreach (var recordGroup in records.GroupBy(x => x.Name))
+			{
+				DnsSecValidationResult validationResult = await ValidateRrSigAsync(recordGroup.Key, recordType, recordClass, recordGroup.ToList(), rrSigRecords, zoneApex, msg, state, budget, token).ConfigureAwait(false);
+
+				if (validationResult != DnsSecValidationResult.Signed)
+					return validationResult;
+			}
+
+			return DnsSecValidationResult.Signed;
+		}
+
+		private static NSec3Record? GetNSec3Parameter(List<NSec3Record> nsec3Records)
+		{
+			return nsec3Records.Where(x => x.HashAlgorithm.IsSupported()).OrderBy(x => x.HashAlgorithm.GetPriority()).FirstOrDefault();
+		}
+
+		private static int GetCommonLabelCount(DomainName name1, DomainName name2)
+		{
+			int count = 0;
+
+			while ((count < name1.LabelCount) && (count < name2.LabelCount)
+			       && String.Equals(name1.Labels[name1.LabelCount - 1 - count], name2.Labels[name2.LabelCount - 1 - count], StringComparison.OrdinalIgnoreCase))
+			{
+				count++;
+			}
+
+			return count;
 		}
 
 		private async Task<DnsSecValidationResult> ValidateRrSigAsync<TRecord>(RrSigRecord rrSigRecord, List<TRecord> coveredRecords, RecordClass recordClass, TState state, DnsSecValidationBudget budget, CancellationToken token)
