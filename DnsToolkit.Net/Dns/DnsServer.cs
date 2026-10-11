@@ -534,7 +534,10 @@ namespace DnsToolkit.Net.Dns
 			refCount.Increment();
 
 			// One slot per query in progress. It is not disposed, as queries may still release their slot after the loop ended.
-			var querySlots = new SemaphoreSlim(maxQueries, maxQueries);
+			// A UDP datagram or an HTTPS request carries a single query, so it needs no slots
+			var querySlots = connection.Transport.TransportProtocol is TransportProtocol.Udp or TransportProtocol.Https
+				? null
+				: new SemaphoreSlim(maxQueries, maxQueries);
 
 			try
 			{
@@ -547,24 +550,28 @@ namespace DnsToolkit.Net.Dns
 				if (!await connection.InitializeAsync(token).ConfigureAwait(false))
 					return;
 
+				// Canceled, when the server stops or a query ends the connection, e.g. a TSIG signed one. No further queries are
+				// read then, but the ones in progress are still answered, before the connection is closed.
+				using var readCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+
 				while (connection.CanRead)
 				{
 					// the next query is read only, if it can be processed, so the client waits meanwhile
 					try
 					{
-						await querySlots.WaitAsync(token).ConfigureAwait(false);
+						if (querySlots != null)
+							await querySlots.WaitAsync(readCts.Token).ConfigureAwait(false);
 					}
-					catch (OperationCanceledException) when (token.IsCancellationRequested)
+					catch (OperationCanceledException) when (readCts.IsCancellationRequested)
 					{
-						// the server is stopping, so no further queries are read
 						break;
 					}
 
-					var queryPackage = await connection.ReceiveAsync(token).ConfigureAwait(false);
+					var queryPackage = await connection.ReceiveAsync(readCts.Token).ConfigureAwait(false);
 
 					if (queryPackage == null)
 					{
-						querySlots.Release();
+						querySlots?.Release();
 						break;
 					}
 
@@ -572,7 +579,7 @@ namespace DnsToolkit.Net.Dns
 
 					// Not bound to a token, as ProcessRawPackageAsync has to release its reference and its slot in any case.
 					// It sends the response also while the server is stopping, only aborting the stop cancels it.
-					_ = Task.Run(() => ProcessRawPackageAsync(connection, queryPackage, refCount, querySlots, abortToken));
+					_ = Task.Run(() => ProcessRawPackageAsync(connection, queryPackage, refCount, querySlots, readCts, abortToken));
 				}
 			}
 			catch (Exception ex)
@@ -585,7 +592,7 @@ namespace DnsToolkit.Net.Dns
 			}
 		}
 
-		private async Task ProcessRawPackageAsync(IServerConnection connection, DnsReceivedRawPackage queryPackage, RefCountDispose refCount, SemaphoreSlim querySlots, CancellationToken abortToken)
+		private async Task ProcessRawPackageAsync(IServerConnection connection, DnsReceivedRawPackage queryPackage, RefCountDispose refCount, SemaphoreSlim? querySlots, CancellationTokenSource readCts, CancellationToken abortToken)
 		{
 			try
 			{
@@ -734,9 +741,10 @@ namespace DnsToolkit.Net.Dns
 					}
 				}
 
-				// Since support for multiple tsig signed messages is not finished, just close connection after response to first signed query
+				// Since support for multiple tsig signed messages is not finished, the connection is closed after the response to the
+				// first signed query. No further queries are read, but the other queries in progress are still answered.
 				if (newTsigMac != null)
-					connection.Dispose();
+					TryCancel(readCts);
 			}
 			catch (Exception ex)
 			{
@@ -747,7 +755,7 @@ namespace DnsToolkit.Net.Dns
 				// e.g. the keep alive of a TCP connection starts, once its last query is finished
 				(connection as IKeepAliveServerConnection)?.OnQueryFinished();
 
-				querySlots.Release();
+				querySlots?.Release();
 				refCount.Decrement();
 			}
 		}

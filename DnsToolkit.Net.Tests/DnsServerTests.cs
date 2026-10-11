@@ -230,6 +230,49 @@ public class DnsServerTests
 	}
 
 	[Fact]
+	public async Task SignedQuery_ClosesTheConnection_OnlyAfterTheOtherQueriesInProgressAreAnswered()
+	{
+		// e.g. queries pipelined over TCP, the unsigned one is still processed, when the signed one is answered
+		var handler = new BlockingQueryHandler();
+		var connection = new FakeServerConnection(CreateSignedQueryPackage(), CreateQueryPackage());
+		var transport = new FakeServerTransport(connection);
+
+		var server = new DnsServer(transport);
+		server.QueryReceived += handler.HandleAsync;
+		server.Start();
+
+		try
+		{
+			Assert.True(await handler.WaitForQueryAsync(TimeSpan.FromSeconds(5)), "The unsigned query was not received");
+			Assert.True(await WaitUntilAsync(() => connection.SentPackages == 1), "The signed query was not answered");
+
+			// before, the response to the signed query closed the connection at once, so this response was lost
+			handler.Release();
+
+			Assert.True(await connection.WaitForDisposeAsync(TimeSpan.FromSeconds(5)), "The connection was not closed after the signed query");
+			Assert.Equal(2, connection.SentPackages);
+		}
+		finally
+		{
+			handler.Release();
+			((IDisposable) server).Dispose();
+		}
+	}
+
+	private static async Task<bool> WaitUntilAsync(Func<bool> condition)
+	{
+		var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+		while (stopwatch.Elapsed < TimeSpan.FromSeconds(10))
+		{
+			if (condition())
+				return true;
+			await Task.Delay(20);
+		}
+
+		return condition();
+	}
+
+	[Fact]
 	public async Task DisposeAsync_AbortsQueryInProgress_AfterTheStopTimeout()
 	{
 		var handler = new BlockingQueryHandler();
@@ -866,6 +909,18 @@ public class DnsServerTests
 		return Task.CompletedTask;
 	}
 
+	/// <summary>
+	///   A TSIG signed query. The server has no key, so it answers with BADKEY, which is signed as well.
+	/// </summary>
+	private static DnsReceivedRawPackage CreateSignedQueryPackage()
+	{
+		var query = new DnsMessage { TransactionID = 0x1111 };
+		query.Questions.Add(new DnsQuestion(_name, RecordType.A, RecordClass.INet));
+		query.TSigOptions = new TSigRecord(DomainName.Parse("key.example.test"), TSigAlgorithm.Sha256, DateTime.Now, TimeSpan.FromMinutes(5), 0x1111, ReturnCode.NoError, null, new byte[32]);
+
+		return new DnsReceivedRawPackage(query.Encode().ToArraySegment(true).ToArray(), new IPEndPoint(IPAddress.Loopback, 50000), new IPEndPoint(IPAddress.Loopback, 53));
+	}
+
 	internal static DnsReceivedRawPackage CreateQueryPackage()
 	{
 		var query = new DnsMessage { TransactionID = 0x4242 };
@@ -1054,6 +1109,10 @@ public class DnsServerTests
 
 		public Task<bool> SendAsync(DnsRawPackage package, CancellationToken token = default)
 		{
+			// like a real connection, a closed one sends nothing anymore
+			if (_disposed.Task.IsCompleted)
+				return Task.FromResult(false);
+
 			Interlocked.Increment(ref _sentPackages);
 			return Task.FromResult(true);
 		}
