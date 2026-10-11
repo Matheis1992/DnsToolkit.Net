@@ -207,6 +207,44 @@ public class DnsSecValidatorTests
 		Assert.Equal(DnsSecValidationResult.Bogus, await ValidateAsync(_host, message, records));
 	}
 
+	[Fact]
+	public async Task NSec3OfADelegationPoint_AsClosestEncloser_IsBogus()
+	{
+		// the NSEC3 records of the parent zone must not deny the names of the child zone
+		var message = NSec3NameError(RecordType.Ns, RecordType.Ds, RecordType.RrSig);
+
+		Assert.Equal(DnsSecValidationResult.Bogus, await ValidateAsync(_childHost, message, new List<ARecord>()));
+	}
+
+	[Fact]
+	public async Task NSec3OfAName_AsClosestEncloser_IsSigned()
+	{
+		var message = NSec3NameError(RecordType.A, RecordType.RrSig);
+
+		Assert.Equal(DnsSecValidationResult.Signed, await ValidateAsync(_childHost, message, new List<ARecord>()));
+	}
+
+	[Fact]
+	public async Task NSec3OfADelegationPoint_DoesNotDenyOtherRecordsThanDs()
+	{
+		var message = new DnsMessage();
+		AddSigned(message, NSec3(_child.GetNSec3Hash(NSec3HashAlgorithm.Sha1, 1, _salt), Enumerable.Repeat((byte) 0xFF, 20).ToArray(), RecordType.Ns, RecordType.RrSig));
+
+		Assert.Equal(DnsSecValidationResult.Bogus, await ValidateAsync(_child, message, new List<ARecord>()));
+		Assert.Equal(DnsSecValidationResult.Signed, await CreateValidator(new[] { _key }).ValidateAsync(_child, RecordType.Ds, RecordClass.INet, message, new List<DsRecord>(), null, default));
+	}
+
+	[Fact]
+	public async Task NSec3WithAnUnknownHashAlgorithm_IsBogus()
+	{
+		// before, the validation threw, because no NSEC3 record with a supported hash algorithm was found
+		var message = new DnsMessage { ReturnCode = ReturnCode.NxDomain };
+		AddSigned(message, new NSec3Record(new DomainName(new byte[20].ToBase32HexString(), _zone), RecordClass.INet, 3600, (NSec3HashAlgorithm) 200, NSec3Flags.None, 1, _salt,
+			Enumerable.Repeat((byte) 0xFF, 20).ToArray(), new List<RecordType> { RecordType.A, RecordType.RrSig }));
+
+		Assert.Equal(DnsSecValidationResult.Bogus, await ValidateNonExistenceAsync(message));
+	}
+
 	private static Task<DnsSecValidationResult> ValidateAsync(DomainName name, DnsMessage message, List<ARecord> records)
 	{
 		return CreateValidator(new[] { _key }).ValidateAsync(name, RecordType.A, RecordClass.INet, message, records, null, default);
@@ -315,6 +353,18 @@ public class DnsSecValidatorTests
 	{
 		var message = new DnsMessage();
 		AddSigned(message, NSec3(name.GetNSec3Hash(NSec3HashAlgorithm.Sha1, 1, _salt), Enumerable.Repeat((byte) 0xFF, 20).ToArray(), types));
+		return message;
+	}
+
+	/// <summary>
+	///   A response, which denies host.child.example.test with an NSEC3 record of child.example.test with the given types as
+	///   closest encloser, and an NSEC3 record, which covers the hashes of all other names
+	/// </summary>
+	private static DnsMessage NSec3NameError(params RecordType[] closestEncloserTypes)
+	{
+		var message = new DnsMessage { ReturnCode = ReturnCode.NxDomain };
+		AddSigned(message, NSec3(_child.GetNSec3Hash(NSec3HashAlgorithm.Sha1, 1, _salt), Enumerable.Repeat((byte) 0xFF, 20).ToArray(), closestEncloserTypes));
+		AddSigned(message, NSec3(new byte[20], Enumerable.Repeat((byte) 0xFF, 20).ToArray(), RecordType.A, RecordType.RrSig));
 		return message;
 	}
 

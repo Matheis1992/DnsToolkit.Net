@@ -219,7 +219,15 @@ namespace DnsToolkit.Net.Dns
 			if (validationResult != DnsSecValidationResult.Signed)
 				return validationResult;
 
-			var nsec3Parameter = nsecRecords.Where(x => x.Name.GetParentName().Equals(zoneApex)).Where(x => x.HashAlgorithm.IsSupported()).Select(x => new { x.HashAlgorithm, x.Iterations, x.Salt }).OrderBy(x => x.HashAlgorithm.GetPriority()).First();
+			var nsec3Parameter = nsecRecords.Where(x => x.Name.GetParentName().Equals(zoneApex)).Where(x => x.HashAlgorithm.IsSupported()).Select(x => new { x.HashAlgorithm, x.Iterations, x.Salt }).OrderBy(x => x.HashAlgorithm.GetPriority()).FirstOrDefault();
+
+			// NSEC3 records with an unknown hash algorithm are ignored, so they prove nothing (RFC 5155, section 8.1)
+			if (nsec3Parameter == null)
+				return DnsSecValidationResult.Bogus;
+
+			// An NSEC3 record of a delegation point, which has the NS bit, but not the SOA bit, belongs to the parent zone. Except
+			// the missing DS record, it proves nothing about the child zone (RFC 5155, section 8.3, and RFC 6840, section 4.1).
+			static bool IsDelegationPoint(NSec3Record record) => record.Types.Contains(RecordType.Ns) && !record.Types.Contains(RecordType.Soa);
 
 			// Treated as insecure like recommended in RFC 9276, but only after the signatures of the NSEC3 records were validated above
 			if (nsec3Parameter.Iterations > _limits.MaxNSec3Iterations)
@@ -239,6 +247,9 @@ namespace DnsToolkit.Net.Dns
 			var directMatch = nsecRecords.FirstOrDefault(x => x.Name.Equals(hashedName));
 			if (directMatch != null)
 			{
+				if ((recordType != RecordType.Ds) && IsDelegationPoint(directMatch))
+					return DnsSecValidationResult.Bogus;
+
 				return directMatch.Types.Contains(recordType) ? DnsSecValidationResult.Bogus : DnsSecValidationResult.Signed;
 			}
 
@@ -248,8 +259,15 @@ namespace DnsToolkit.Net.Dns
 
 			while (true)
 			{
-				if (nsecRecords.Any(x => x.Name.Equals(hashedName, true)))
+				var closestEncloserMatch = nsecRecords.FirstOrDefault(x => x.Name.Equals(hashedName, true));
+				if (closestEncloserMatch != null)
+				{
+					// names below a delegation or a DNAME record are not in the zone, so the zone cannot deny them (RFC 5155, section 8.3)
+					if (IsDelegationPoint(closestEncloserMatch) || closestEncloserMatch.Types.Contains(RecordType.DName))
+						return DnsSecValidationResult.Bogus;
+
 					break;
+				}
 
 				if (current.Equals(zoneApex))
 					return DnsSecValidationResult.Bogus; // closest encloser could not be found, but at least the zone apex must be found as
