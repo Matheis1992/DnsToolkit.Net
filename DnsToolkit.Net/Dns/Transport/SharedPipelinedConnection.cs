@@ -36,6 +36,18 @@ internal sealed class SharedPipelinedConnection : IPooledConnection
 	private readonly CancellationTokenSource _idleCts = new();
 	private TimeSpan _idleTimeout;
 
+	/// <summary>
+	///   The time without any query, after which the connection is closed
+	/// </summary>
+	internal TimeSpan IdleTimeout
+	{
+		get
+		{
+			lock (_lock)
+				return _idleTimeout;
+		}
+	}
+
 	// canceled when the connection is closed, so the pending read of the receive loop ends
 	private readonly CancellationTokenSource _closeCts = new();
 
