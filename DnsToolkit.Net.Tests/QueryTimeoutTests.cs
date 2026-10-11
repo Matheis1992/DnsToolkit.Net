@@ -106,21 +106,23 @@ public class QueryTimeoutTests
 	[Fact]
 	public async Task MultiMessageResponse_RestartsTimeoutForEveryMessage()
 	{
-		// every message arrives within the timeout, but the whole zone transfer takes longer than the timeout
-		var interval = TimeSpan.FromMilliseconds(_QUERY_TIMEOUT * 0.6);
+		// Every message arrives within the timeout, but the whole zone transfer takes longer than the timeout. A longer timeout
+		// than in the other tests leaves enough time for a delay, which takes longer on a busy build server.
+		const int queryTimeout = 1500;
+		var interval = TimeSpan.FromMilliseconds(queryTimeout * 0.4);
 		var transport = new ScriptedTransport(query => new[]
 		{
 			(interval, ZoneTransferMessage(query, Soa(), A("a"))),
 			(interval, ZoneTransferMessage(query, A("b"))),
 			(interval, ZoneTransferMessage(query, A("c"), Soa()))
 		});
-		using var client = new DnsClient(new[] { IPAddress.Loopback }, new IClientTransport[] { transport }, true, _QUERY_TIMEOUT);
+		using var client = new DnsClient(new[] { IPAddress.Loopback }, new IClientTransport[] { transport }, true, queryTimeout);
 
 		var stopwatch = Stopwatch.StartNew();
 		var response = await client.SendMessageAsync(ZoneTransferQuery());
 
 		Assert.NotNull(response);
-		Assert.True(stopwatch.Elapsed > TimeSpan.FromMilliseconds(_QUERY_TIMEOUT), "The zone transfer was faster than the timeout, so the test does not check the restart");
+		Assert.True(stopwatch.Elapsed > TimeSpan.FromMilliseconds(queryTimeout), "The zone transfer was faster than the timeout, so the test does not check the restart");
 		Assert.Equal(new[] { RecordType.Soa, RecordType.A, RecordType.A, RecordType.A, RecordType.Soa }, response!.AnswerRecords.Select(r => r.RecordType));
 	}
 

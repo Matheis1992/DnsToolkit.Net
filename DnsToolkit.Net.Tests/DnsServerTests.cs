@@ -664,21 +664,17 @@ public class DnsServerTests
 	/// </summary>
 	private static (UdpClient UdpBlocker, IPEndPoint EndPoint) BlockUdpPortWithFreeTcpPort()
 	{
+		// The port is free for TCP and UDP, see GetFreePort. Another process may take it meanwhile, so retry with other ports.
 		for (var attempt = 0; ; attempt++)
 		{
-			var udpBlocker = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
-			var endpoint = new IPEndPoint(IPAddress.Loopback, ((IPEndPoint) udpBlocker.Client.LocalEndPoint!).Port);
+			var endpoint = new IPEndPoint(IPAddress.Loopback, LocalDnsServer.GetFreePort());
 
 			try
 			{
-				var probe = new TcpListener(endpoint);
-				probe.Start();
-				probe.Stop();
-				return (udpBlocker, endpoint);
+				return (new UdpClient(endpoint), endpoint);
 			}
 			catch (SocketException) when (attempt < 10)
 			{
-				udpBlocker.Dispose();
 			}
 		}
 	}

@@ -106,13 +106,51 @@ internal sealed class LocalDnsServer : IDisposable
 		((IDisposable) _server).Dispose();
 	}
 
+	private static readonly Random _random = new();
+
+	/// <summary>
+	///   A port, which is free for TCP and UDP. On Windows, e.g. Hyper-V reserves blocks of ports, often for only one of the
+	///   protocols, and binding a reserved port fails with WSAEACCES. The ports, which the system hands out, are taken one
+	///   after another from the dynamic range, where these blocks usually are, so a port free for TCP was often reserved for
+	///   UDP, and so were the next ones. Random ports below the dynamic range avoid both.
+	/// </summary>
 	public static int GetFreePort()
 	{
-		var listener = new TcpListener(IPAddress.Loopback, 0);
-		listener.Start();
-		var port = ((IPEndPoint) listener.LocalEndpoint).Port;
-		listener.Stop();
-		return port;
+		for (var attempt = 1;; attempt++)
+		{
+			int port;
+			lock (_random)
+				port = _random.Next(20000, 45000);
+
+			if (IsFreeForTcpAndUdp(port))
+				return port;
+
+			if (attempt == 100)
+				throw new InvalidOperationException("No port free for TCP and UDP was found");
+		}
+	}
+
+	private static bool IsFreeForTcpAndUdp(int port)
+	{
+		var endpoint = new IPEndPoint(IPAddress.Loopback, port);
+		TcpListener? tcp = null;
+
+		try
+		{
+			tcp = new TcpListener(endpoint);
+			tcp.Start();
+
+			using var udp = new UdpClient(endpoint);
+			return true;
+		}
+		catch (SocketException)
+		{
+			return false;
+		}
+		finally
+		{
+			tcp?.Stop();
+		}
 	}
 
 	private static X509Certificate2 CreateSelfSignedCertificate()
