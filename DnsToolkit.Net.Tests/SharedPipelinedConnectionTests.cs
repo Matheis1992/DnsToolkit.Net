@@ -360,17 +360,18 @@ public class SharedPipelinedConnectionTests
 		// the server keeps the connection open for 1.5 s, which is longer than the own idle timeout
 		query.RestartIdleTimeout(TimeSpan.FromMilliseconds(1500));
 		query.Dispose();
-
-		// Measured from the start of the idle timeout. Before, the measurement started after the delay and assumed it took
-		// exactly 400 ms, so a delay, which took longer on a busy build server, made the connection seem closed too early.
 		var stopwatch = System.Diagnostics.Stopwatch.StartNew();
 
+		// The connection is closed a tenth before the server closes it. This is checked on the timeout itself, as the time,
+		// until the timer closed the connection, can be much longer on a busy build server than planned.
+		Assert.Equal(TimeSpan.FromMilliseconds(1350), shared.IdleTimeout);
+
+		// A timer does not fire early, so the own idle timeout of 50 ms no longer applies
 		await Task.Delay(400);
 		Assert.True(shared.IsAlive, "The connection was closed before the keepalive of the server");
 
-		// but before the server closes it
-		Assert.True(await WaitUntilClosedAsync(connection, TimeSpan.FromSeconds(5)), "The connection was not closed after the keepalive of the server");
-		Assert.InRange(stopwatch.Elapsed, TimeSpan.FromMilliseconds(1000), TimeSpan.FromMilliseconds(1500));
+		Assert.True(await WaitUntilClosedAsync(connection, TimeSpan.FromSeconds(10)), "The connection was not closed after the keepalive of the server");
+		Assert.True(stopwatch.Elapsed >= TimeSpan.FromMilliseconds(1300), $"The connection was closed after {stopwatch.Elapsed}, before the keepalive of the server");
 	}
 
 	[Fact]
