@@ -1,5 +1,6 @@
 #region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
+// Modifications Copyright 2026 Matheis1992
 // 
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
 // 
@@ -45,9 +46,12 @@ namespace DnsToolkit.Net.Dns
 		/// <summary>
 		///   Provides a new instance with a custom timeout
 		/// </summary>
-		/// <param name="queryTimeout"> Query timeout in milliseconds </param>
+		/// <param name="queryTimeout">
+		///   Query timeout in milliseconds. The responses are collected until it expires, so it has to be greater than 0.
+		/// </param>
+		/// <exception cref="ArgumentOutOfRangeException">The timeout is 0 or less</exception>
 		public LlmnrClient(int queryTimeout)
-			: base(_addresses, queryTimeout, new IClientTransport[] { new MulticastClientTransport(DEFAULT_PORT), new TcpClientTransport(DEFAULT_PORT) }, true) { }
+			: base(_addresses, RequireMulticastQueryTimeout(queryTimeout), new IClientTransport[] { new MulticastClientTransport(DEFAULT_PORT), new TcpClientTransport(DEFAULT_PORT) }, true) { }
 
 		/// <summary>
 		///   Queries for specified records.
@@ -55,6 +59,7 @@ namespace DnsToolkit.Net.Dns
 		/// <param name="name"> Name, that should be queried </param>
 		/// <param name="recordType"> Type the should be queried </param>
 		/// <returns> All available responses on the local network </returns>
+		[Obsolete("Blocks the calling thread while waiting for the DNS responses. Use ResolveAsync instead.")]
 		public List<LlmnrMessage> Resolve(DomainName name, RecordType recordType = RecordType.A)
 		{
 			_ = name ?? throw new ArgumentNullException(nameof(name), "Name must be provided");

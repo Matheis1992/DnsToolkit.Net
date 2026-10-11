@@ -1,5 +1,6 @@
 ﻿#region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
+// Modifications Copyright 2026 Matheis1992
 // 
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
 // 
@@ -20,11 +21,19 @@ namespace DnsToolkit.Net
 {
 	internal static class TaskExtensions
 	{
+		/// <summary>
+		///   Converts a timeout in milliseconds, where 0 or less means no timeout like the timeouts of sockets
+		/// </summary>
+		public static TimeSpan ToTimeout(int milliseconds)
+		{
+			return milliseconds > 0 ? TimeSpan.FromMilliseconds(milliseconds) : Timeout.InfiniteTimeSpan;
+		}
+
 		public static async Task<T?> WithTimeout<T>(this Task<T> task, int timeout, CancellationToken token = default)
 		{
 			try
 			{
-				return await task.WaitAsync(TimeSpan.FromMilliseconds(timeout), token);
+				return await task.WaitAsync(ToTimeout(timeout), token).ConfigureAwait(false);
 			}
 			catch (TimeoutException)
 			{
@@ -36,7 +45,7 @@ namespace DnsToolkit.Net
 		{
 			try
 			{
-				await task.WaitAsync(TimeSpan.FromMilliseconds(timeout), token);
+				await task.WaitAsync(ToTimeout(timeout), token).ConfigureAwait(false);
 			}
 			catch (TimeoutException)
 			{

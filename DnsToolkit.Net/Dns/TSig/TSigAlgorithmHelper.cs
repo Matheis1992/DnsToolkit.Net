@@ -1,5 +1,6 @@
 ﻿#region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
+// Modifications Copyright 2026 Matheis1992
 // 
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
 // 
@@ -95,7 +96,7 @@ namespace DnsToolkit.Net.Dns
 					return new HMac(new Sha256Digest());
 				case TSigAlgorithm.Sha384:
 				case TSigAlgorithm.Sha384_192:
-					return new HMac(new Sha256Digest());
+					return new HMac(new Sha384Digest());
 				case TSigAlgorithm.Sha512:
 				case TSigAlgorithm.Sha512_256:
 					return new HMac(new Sha512Digest());

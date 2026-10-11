@@ -1,5 +1,6 @@
 ﻿#region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
+// Modifications Copyright 2026 Matheis1992
 // 
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
 // 
@@ -84,6 +85,7 @@ namespace DnsToolkit.Net.Dns
 		/// <param name="recordClass"> Class the should be queried </param>
 		/// <param name="options"> Options for the query </param>
 		/// <returns> The complete response of the dns server </returns>
+		[Obsolete("Blocks the calling thread while waiting for the DNS responses. Use ResolveAsync instead.")]
 		public DnsMessage? Resolve(DomainName name, RecordType recordType = RecordType.A, RecordClass recordClass = RecordClass.INet, DnsQueryOptions? options = null)
 		{
 			_ = name ?? throw new ArgumentNullException(nameof(name), "Name must be provided");
@@ -132,6 +134,7 @@ namespace DnsToolkit.Net.Dns
 		/// </summary>
 		/// <param name="message"> Message, that should be send to the dns server </param>
 		/// <returns> The complete response of the dns server </returns>
+		[Obsolete("Blocks the calling thread while waiting for the DNS responses. Use SendMessageAsync instead.")]
 		public DnsMessage? SendMessage(DnsMessage message)
 		{
 			_ = message ?? throw new ArgumentNullException(nameof(message));
@@ -163,6 +166,7 @@ namespace DnsToolkit.Net.Dns
 		/// </summary>
 		/// <param name="message"> Update, that should be send to the dns server </param>
 		/// <returns> The complete response of the dns server </returns>
+		[Obsolete("Blocks the calling thread while waiting for the DNS responses. Use SendUpdateAsync instead.")]
 		public DnsUpdateMessage? SendUpdate(DnsUpdateMessage message)
 		{
 			_ = message ?? throw new ArgumentNullException(nameof(message));

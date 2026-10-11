@@ -1,5 +1,6 @@
 #region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
+// Modifications Copyright 2026 Matheis1992
 // 
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
 // 
@@ -18,6 +19,7 @@
 
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 
 namespace DnsToolkit.Net.Dns;
 
@@ -33,7 +35,12 @@ public class UdpServerTransport : IServerTransport
 
 	private readonly IPEndPoint _endpoint;
 	private readonly int _timeout;
-	private readonly Socket _socket;
+
+	private readonly object _lock = new();
+	private bool _isDisposed;
+
+	// A closed socket cannot be bound again, so every bind creates a new one. Null, if the transport is not bound.
+	private Socket? _socket;
 
 	/// <summary>
 	///   The default allowed response size if no EDNS option is set.
@@ -72,17 +79,80 @@ public class UdpServerTransport : IServerTransport
 	{
 		_endpoint = endpoint;
 		_timeout = timeout;
-		_socket = new Socket(endpoint.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
-		if (endpoint.Address.Equals(IPAddress.IPv6Any))
-			_socket.DualMode = true;
+		_anyEndPoint = new IPEndPoint(endpoint.AddressFamily == AddressFamily.InterNetwork ? IPAddress.Any : IPAddress.IPv6Any, 0);
+	}
+
+	private readonly IPEndPoint _anyEndPoint;
+
+	private Socket CreateSocket()
+	{
+		var socket = new Socket(_endpoint.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+
+		try
+		{
+			if (_endpoint.Address.Equals(IPAddress.IPv6Any))
+				socket.DualMode = true;
+
+			DisableConnectionResetReporting(socket);
+			return socket;
+		}
+		catch
+		{
+			socket.Dispose();
+			throw;
+		}
 	}
 
 	/// <summary>
-	///   Binds the transport to the network stack
+	///   On Windows an ICMP port unreachable for a sent response, e.g. because the client already closed its socket,
+	///   fails the next receive of the socket. For a server socket shared by all clients this must be disabled.
 	/// </summary>
+	private static void DisableConnectionResetReporting(Socket socket)
+	{
+		if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+			return;
+
+		const int SIO_UDP_CONNRESET = -1744830452;
+
+		try
+		{
+			socket.IOControl(SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
+		}
+		catch (SocketException)
+		{
+			// not supported, the error is also handled on receive
+		}
+	}
+
+	/// <summary>
+	///   Binds the transport to the network stack. After the transport was closed, it can be bound again.
+	/// </summary>
+	/// <exception cref="ObjectDisposedException">The transport was disposed</exception>
+	/// <exception cref="InvalidOperationException">The transport is already bound</exception>
 	public void Bind()
 	{
-		_socket.Bind(_endpoint);
+		lock (_lock)
+		{
+			if (_isDisposed)
+				throw new ObjectDisposedException(GetType().FullName);
+
+			if (_socket != null)
+				throw new InvalidOperationException("The transport is already bound");
+
+			var socket = CreateSocket();
+
+			try
+			{
+				socket.Bind(_endpoint);
+			}
+			catch
+			{
+				socket.Dispose();
+				throw;
+			}
+
+			_socket = socket;
+		}
 	}
 
 	/// <summary>
@@ -90,41 +160,91 @@ public class UdpServerTransport : IServerTransport
 	/// </summary>
 	public void Close()
 	{
-		_socket.Close();
+		TakeSocket()?.Close();
+	}
+
+	/// <summary>
+	///   Ends the current binding, so the transport can be bound again
+	/// </summary>
+	private Socket? TakeSocket(bool dispose = false)
+	{
+		lock (_lock)
+		{
+			if (dispose)
+				_isDisposed = true;
+
+			var socket = _socket;
+			_socket = null;
+			return socket;
+		}
 	}
 
 	/// <summary>
 	///   Waits for a new connection and return the connection
 	/// </summary>
 	/// <param name="token"> The token to monitor cancellation requests </param>
-	/// <returns>A new connection to a client or null, if no connection could not be established</returns>
+	/// <returns>A new connection to a client, or null if the token was cancelled</returns>
+	/// <exception cref="SocketException">The socket failed, e.g. because it was closed</exception>
+	/// <exception cref="InvalidOperationException">The transport is not bound</exception>
 	public async Task<IServerConnection?> AcceptConnectionAsync(CancellationToken token = default)
 	{
-		try
-		{
-			var buffer = new byte[DefaultAllowedResponseSize + DnsRawPackage.LENGTH_HEADER_LENGTH];
-			var udpMessage = await _socket.ReceiveMessageFromAsync(
-				new ArraySegment<byte>(buffer, DnsRawPackage.LENGTH_HEADER_LENGTH, buffer.Length - DnsRawPackage.LENGTH_HEADER_LENGTH),
-				SocketFlags.None,
-				new IPEndPoint(_endpoint.AddressFamily == AddressFamily.InterNetwork ? IPAddress.Any : IPAddress.IPv6Any, 0), token);
+		var socket = Volatile.Read(ref _socket) ?? throw new InvalidOperationException("The transport is not bound");
 
-			DnsMessageBase.EncodeUShort(buffer, 0, (ushort) udpMessage.ReceivedBytes);
-
-			return new UdpServerConnection(
-				this,
-				new DnsReceivedRawPackage(buffer, (IPEndPoint) udpMessage.RemoteEndPoint, _endpoint),
-				_socket,
-				_timeout);
-		}
-		catch
+		// Errors which only concern a single datagram are handled here by receiving the next one,
+		// so the server only sees errors of the socket itself
+		while (true)
 		{
-			return null;
+			var buffer = UdpReceiveBuffer.Rent();
+			Task<SocketReceiveMessageFromResult>? receiveTask = null;
+
+			try
+			{
+#if NETSTANDARD2_0
+				// this receive cannot be cancelled, so only the waiting is cancelled
+				receiveTask = socket.ReceiveMessageFromAsync(UdpReceiveBuffer.GetReceiveSegment(buffer), SocketFlags.None, _anyEndPoint);
+				var result = await receiveTask.WaitAsync(token).ConfigureAwait(false);
+#else
+				receiveTask = socket.ReceiveMessageFromAsync(UdpReceiveBuffer.GetReceiveSegment(buffer), SocketFlags.None, _anyEndPoint, token).AsTask();
+				var result = await receiveTask.ConfigureAwait(false);
+#endif
+
+				return new UdpServerConnection(
+					this,
+					new DnsReceivedRawPackage(UdpReceiveBuffer.CopyMessage(buffer, result.ReceivedBytes), (IPEndPoint) result.RemoteEndPoint, _endpoint),
+					socket,
+					_timeout);
+			}
+			catch (SocketException ex) when (IsDatagramError(ex.SocketErrorCode))
+			{
+				// receive the next datagram
+			}
+			catch (OperationCanceledException) when (token.IsCancellationRequested)
+			{
+				return null;
+			}
+			finally
+			{
+				// a receive which is still pending may write into the buffer, so it is only returned if the receive is done
+				UdpReceiveBuffer.Return(buffer, receiveTask);
+			}
 		}
+	}
+
+	/// <summary>
+	///   Errors of a single datagram, e.g. an ICMP message for a previously sent response or a datagram larger than the buffer
+	/// </summary>
+	private static bool IsDatagramError(SocketError error)
+	{
+		return error is SocketError.ConnectionReset
+			or SocketError.MessageSize
+			or SocketError.NetworkReset
+			or SocketError.HostUnreachable
+			or SocketError.NetworkUnreachable;
 	}
 
 	public void Dispose()
 	{
-		_socket.TryDispose();
+		TakeSocket(dispose: true)?.TryDispose();
 	}
 
 	private class UdpServerConnection : IServerConnection
@@ -159,7 +279,7 @@ public class UdpServerTransport : IServerTransport
 		{
 			try
 			{
-				var sentBytes = await _socket.SendToAsync(package.ToArraySegment(false), SocketFlags.None, _receivedRawPackage.RemoteEndpoint, token).AsTask().WithTimeout(_timeout, token);
+				var sentBytes = await _socket.SendToAsync(package.ToArraySegment(false), SocketFlags.None, _receivedRawPackage.RemoteEndpoint, token).AsTask().WithTimeout(_timeout, token).ConfigureAwait(false);
 
 				return sentBytes == package.Length;
 			}

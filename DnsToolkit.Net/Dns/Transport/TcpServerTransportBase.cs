@@ -1,5 +1,6 @@
 #region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
+// Modifications Copyright 2026 Matheis1992
 // 
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
 // 
@@ -38,6 +39,7 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 	/// </summary>
 	public int KeepAlive { get; }
 
+	private readonly IPEndPoint _bindEndPoint;
 	private readonly TcpListener _tcpListener;
 
 	/// <summary>
@@ -64,9 +66,8 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 	{
 		Timeout = timeout;
 		KeepAlive = keepAlive;
+		_bindEndPoint = bindEndPoint;
 		_tcpListener = new TcpListener(bindEndPoint);
-		if (bindEndPoint.Address.Equals(IPAddress.IPv6Any))
-			_tcpListener.Server.DualMode = true;
 	}
 
 	/// <summary>
@@ -74,6 +75,10 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 	/// </summary>
 	public void Bind()
 	{
+		// Stopping the listener replaces its socket, so dual mode is set for every start, also after a restart of the server
+		if (_bindEndPoint.Address.Equals(IPAddress.IPv6Any))
+			_tcpListener.Server.DualMode = true;
+
 		_tcpListener.Start();
 	}
 
@@ -91,20 +96,41 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 	///   Waits for a new connection and return the connection
 	/// </summary>
 	/// <param name="token"> The token to monitor cancellation requests </param>
-	/// <returns>A new connection to a client or null, if no connection could not be established</returns>
+	/// <returns>A new connection to a client, or null if the token was cancelled</returns>
+	/// <exception cref="SocketException">The listener failed, e.g. because it was stopped</exception>
 	public async Task<IServerConnection?> AcceptConnectionAsync(CancellationToken token = default)
 	{
-		try
+		// Errors which only concern a single client, e.g. a client which disconnected again before it was accepted,
+		// are handled here by accepting the next client, so the server only sees errors of the listener itself
+		while (true)
 		{
-			var client = await _tcpListener.AcceptTcpClientAsync(token);
-			client.SendTimeout = Timeout;
-			client.ReceiveTimeout = Timeout;
+			TcpClient client;
 
-			return CreateConnection(client, token);
-		}
-		catch
-		{
-			return null;
+			try
+			{
+				client = await _tcpListener.AcceptTcpClientAsync(token).ConfigureAwait(false);
+			}
+			catch (SocketException ex) when (ex.SocketErrorCode is SocketError.ConnectionReset or SocketError.ConnectionAborted)
+			{
+				continue;
+			}
+			catch (OperationCanceledException) when (token.IsCancellationRequested)
+			{
+				return null;
+			}
+
+			try
+			{
+				client.SendTimeout = Timeout;
+				client.ReceiveTimeout = Timeout;
+
+				return CreateConnection(client, token);
+			}
+			catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
+			{
+				// the client disconnected meanwhile
+				client.Dispose();
+			}
 		}
 	}
 
@@ -123,10 +149,16 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 	/// <summary>
 	///   The connection which is used to the server using TCP communication
 	/// </summary>
-	protected abstract class TcpServerConnectionBase : IServerConnection
+	protected abstract class TcpServerConnectionBase : IServerConnection, IKeepAliveServerConnection
 	{
 		protected readonly TTransport TransportInternal;
-		private Stream? _stream;
+		private DnsTcpMessageStream? _messageStream;
+
+		// Canceled once the keep alive expired, then no further queries are read. The keep alive only runs while no query is
+		// in progress, so it does not end the connection, while responses are still produced (RFC 7766, section 6.2.3).
+		private readonly CancellationTokenSource _idleCts = new();
+		private readonly object _queriesLock = new();
+		private int _queriesInProgress;
 
 		protected TcpClient Client { get; }
 
@@ -158,64 +190,84 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 		/// </summary>
 		public async Task<bool> InitializeAsync(CancellationToken token)
 		{
-			_stream = await GetStreamFromClientAsync(token);
-			return _stream != null;
+			var stream = await GetStreamFromClientAsync(token).ConfigureAwait(false);
+			if (stream == null)
+				return false;
+
+			_messageStream = new DnsTcpMessageStream(stream);
+
+			lock (_queriesLock)
+				_idleCts.CancelAfter(TaskExtensions.ToTimeout(TransportInternal.KeepAlive));
+
+			return true;
+		}
+
+		private void OnQueryReceived()
+		{
+			lock (_queriesLock)
+			{
+				if (_queriesInProgress++ == 0)
+					_idleCts.CancelAfter(System.Threading.Timeout.InfiniteTimeSpan);
+			}
+		}
+
+		void IKeepAliveServerConnection.OnQueryFinished()
+		{
+			// CancelAfter cancels by a timer, also with a delay of 0, so nothing runs inside of the lock
+			lock (_queriesLock)
+			{
+				if (--_queriesInProgress == 0)
+					_idleCts.CancelAfter(TaskExtensions.ToTimeout(TransportInternal.KeepAlive));
+			}
 		}
 
 		/// <summary>
 		///   Receives a new package of the client
 		/// </summary>
 		/// <param name="token"> The token to monitor cancellation requests </param>
-		/// <returns>A raw package sent by the client</returns>
+		/// <returns>A raw package sent by the client, or null if the client disconnected or a timeout occured</returns>
 		public virtual async Task<DnsReceivedRawPackage?> ReceiveAsync(CancellationToken token = default)
 		{
+			if (_messageStream == null)
+				return null;
+
 			try
 			{
-				var requestBuffer = new byte[2];
-				if (!await TryReadAsync(new ArraySegment<byte>(requestBuffer), TransportInternal.KeepAlive, token)) // client disconnected while reading or timeout
+				var remoteEndPoint = RemoteEndPoint;
+				var localEndPoint = LocalEndPoint;
+
+				// Wait for the next query until the keep alive expired, and up to the timeout for the rest of it. Neither the keep
+				// alive nor the token cancel the read itself, as canceling closes the stream, but the responses to the queries
+				// in progress still have to be sent, before the connection is closed.
+				var read = _messageStream.ReadMessageAsync(
+					System.Threading.Timeout.InfiniteTimeSpan,
+					_idleCts.Token,
+					TaskExtensions.ToTimeout(TransportInternal.Timeout),
+					CancellationToken.None);
+
+				byte[]? message;
+				try
+				{
+					message = await read.WaitAsync(token).ConfigureAwait(false);
+				}
+				catch (OperationCanceledException) when (token.IsCancellationRequested)
+				{
+					// The read ends when the connection is disposed, after the responses were sent.
+					// A query, which is received meanwhile, is not processed anymore.
+					_ = read.ContinueWith(t => t.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+					return null;
+				}
+
+				if (message == null)
 					return null;
 
-				var offset = 0;
-				int requestLength = DnsMessageBase.ParseUShort(requestBuffer, ref offset);
-
-				requestBuffer = new byte[requestLength + DnsRawPackage.LENGTH_HEADER_LENGTH];
-				if (!await TryReadAsync(new ArraySegment<byte>(requestBuffer, DnsRawPackage.LENGTH_HEADER_LENGTH, requestLength), TransportInternal.Timeout, token)) // client disconnected while reading or timeout
-					return null;
-
-				return new DnsReceivedRawPackage(requestBuffer, RemoteEndPoint, LocalEndPoint);
+				// counted here, so the keep alive cannot expire between receiving the query and processing it
+				OnQueryReceived();
+				return new DnsReceivedRawPackage(message, remoteEndPoint, localEndPoint);
 			}
 			catch
 			{
 				return null;
-			}
-		}
-
-		private async Task<bool> TryReadAsync(ArraySegment<byte> buffer, int timeout, CancellationToken token)
-		{
-			if (_stream == null)
-				return false;
-
-			try
-			{
-				var readBytes = 0;
-				while (readBytes < buffer.Count)
-				{
-					if (token.IsCancellationRequested || !Client.IsConnected())
-						return false;
-
-					var newReadBytes = await _stream.ReadAsync(buffer.Array!, buffer.Offset + readBytes, buffer.Count - readBytes, token).WithTimeout(timeout, token);
-
-					if (newReadBytes == 0) // timeout
-						return false;
-
-					readBytes += newReadBytes;
-				}
-
-				return true;
-			}
-			catch
-			{
-				return false;
 			}
 		}
 
@@ -227,16 +279,26 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 		/// <returns>true, of the package could be sent to the client; otherwise, false</returns>
 		public virtual async Task<bool> SendAsync(DnsRawPackage package, CancellationToken token = default)
 		{
-			if (_stream == null)
+			if (_messageStream == null)
 				return false;
 
 			try
 			{
-				await _stream.WriteAsync(package.ToArraySegment(true), token);
+				// A client, which does not read its responses, would otherwise keep the connection and its slot forever. The
+				// timeouts of the socket do not apply to asynchronous writes.
+				using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+				if (TransportInternal.Timeout > 0)
+					timeoutCts.CancelAfter(TransportInternal.Timeout);
+
+				// serialized by the message stream, as responses to pipelined queries are sent concurrently
+				await _messageStream.WriteMessageAsync(package.ToArraySegment(true), timeoutCts.Token).ConfigureAwait(false);
 				return true;
 			}
 			catch
 			{
+				// Also a response, which timed out while it waited for the others, is closing the connection. Otherwise the
+				// client would wait for it on a connection, which still looks healthy, instead of retrying on a new one.
+				_messageStream.Dispose();
 				return false;
 			}
 		}
@@ -248,7 +310,10 @@ public abstract class TcpServerTransportBase<TTransport> : IServerTransport
 
 		public void Dispose()
 		{
-			_stream?.TryDispose();
+			// Stops the timer of the keep alive. The source is not disposed, as the server may still report finished queries.
+			_idleCts.Cancel();
+
+			_messageStream?.Dispose();
 			Client.TryDispose();
 		}
 	}

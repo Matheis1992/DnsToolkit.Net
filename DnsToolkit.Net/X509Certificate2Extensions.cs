@@ -1,5 +1,6 @@
 ﻿#region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
+// Modifications Copyright 2026 Matheis1992
 // 
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
 // 
@@ -22,6 +23,7 @@ using System.Linq;
 using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using DnsToolkit.Net.Dns;
 using Org.BouncyCastle.Crypto.Digests;
@@ -47,7 +49,28 @@ namespace DnsToolkit.Net
 		///   specified, a self validating stub resolver will be used.
 		/// </param>
 		/// <returns>true, of the certificate can be verified by SMIMEA dns records; otherwise, false</returns>
+		[Obsolete("Blocks the calling thread while waiting for the DNS responses. Use VerifyCertificateBySMimeAAsync instead.")]
 		public static bool VerifyCertificateBySMimeA(this X509Certificate2 certificate, string? mailAddress = null, X509Chain? chain = null, IDnsSecResolver? resolver = null)
+		{
+			return certificate.VerifyCertificateBySMimeAAsync(mailAddress, chain, resolver).GetAwaiter().GetResult();
+		}
+
+		/// <summary>
+		///   Verifies a S/MIME certificate using SMIMEA DNS records as an asynchronous operation.
+		/// </summary>
+		/// <param name="certificate">The certificate to be verified.</param>
+		/// <param name="mailAddress">
+		///   The mail address which should be verified. If null is specified, the mail address of the
+		///   certificate will be used.
+		/// </param>
+		/// <param name="chain">The certificate chain which should be used for verification.</param>
+		/// <param name="resolver">
+		///   The DNSSec resolver which should be used to resolve the SMIMEA dns records. If null is
+		///   specified, a self validating stub resolver will be used.
+		/// </param>
+		/// <param name="token"> The token to monitor cancellation requests </param>
+		/// <returns>true, of the certificate can be verified by SMIMEA dns records; otherwise, false</returns>
+		public static async Task<bool> VerifyCertificateBySMimeAAsync(this X509Certificate2 certificate, string? mailAddress = null, X509Chain? chain = null, IDnsSecResolver? resolver = null, CancellationToken token = default)
 		{
 			mailAddress ??= certificate.GetNameInfo(X509NameType.EmailName, false);
 
@@ -56,9 +79,16 @@ namespace DnsToolkit.Net
 
 			DomainName smimeaName = GetSMimeAName(mailAddress);
 
-			resolver ??= new SelfValidatingInternalDnsSecStubResolver();
-
-			var dnsResult = resolver.ResolveSecure<SMimeARecord>(smimeaName, RecordType.SMimeA);
+			DnsSecResult<SMimeARecord> dnsResult;
+			if (resolver != null)
+			{
+				dnsResult = await resolver.ResolveSecureAsync<SMimeARecord>(smimeaName, RecordType.SMimeA, token: token).ConfigureAwait(false);
+			}
+			else
+			{
+				using var ownResolver = new SelfValidatingInternalDnsSecStubResolver();
+				dnsResult = await ownResolver.ResolveSecureAsync<SMimeARecord>(smimeaName, RecordType.SMimeA, token: token).ConfigureAwait(false);
+			}
 
 			if (dnsResult.ValidationResult != DnsSecValidationResult.Signed)
 				return false;

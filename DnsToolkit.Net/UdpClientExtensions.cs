@@ -1,5 +1,6 @@
 ﻿#region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
+// Modifications Copyright 2026 Matheis1992
 // 
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
 // 
@@ -33,7 +34,7 @@ namespace DnsToolkit.Net
 			var connectTask = udpClient.ReceiveAsync();
 			var timeoutTask = Task.Delay(timeout, token);
 
-			await Task.WhenAny(connectTask, timeoutTask);
+			await Task.WhenAny(connectTask, timeoutTask).ConfigureAwait(false);
 
 			if (connectTask.IsCompleted)
 				return connectTask.Result;

@@ -1,5 +1,6 @@
 ﻿#region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
+// Modifications Copyright 2026 Matheis1992
 // 
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
 // 
@@ -37,6 +38,7 @@ namespace DnsToolkit.Net.Dns
 		/// <param name="resolver"> The resolver instance, that should be used for queries </param>
 		/// <param name="name"> Host name, that should be queried </param>
 		/// <returns> A list of matching host addresses </returns>
+		[Obsolete("Blocks the calling thread while waiting for the DNS responses. Use ResolveHostAsync instead.")]
 		public static List<IPAddress> ResolveHost(this IDnsResolver resolver, DomainName name)
 		{
 			List<IPAddress> result = new List<IPAddress>();
@@ -58,6 +60,7 @@ namespace DnsToolkit.Net.Dns
 		/// <param name="resolver"> The resolver instance, that should be used for queries </param>
 		/// <param name="name"> Host name, that should be queried </param>
 		/// <returns> A list of matching host addresses </returns>
+		[Obsolete("Blocks the calling thread while waiting for the DNS responses. Use ResolveHostAsync instead.")]
 		public static List<IPAddress> ResolveHost(this IDnsResolver resolver, string name)
 		{
 			return resolver.ResolveHost(DomainName.Parse(name));
@@ -74,11 +77,11 @@ namespace DnsToolkit.Net.Dns
 		{
 			List<IPAddress> result = new List<IPAddress>();
 
-			List<AaaaRecord> aaaaRecords = await resolver.ResolveAsync<AaaaRecord>(name, RecordType.Aaaa, token: token);
+			List<AaaaRecord> aaaaRecords = await resolver.ResolveAsync<AaaaRecord>(name, RecordType.Aaaa, token: token).ConfigureAwait(false);
 			if (aaaaRecords != null)
 				result.AddRange(aaaaRecords.Select(x => x.Address));
 
-			List<ARecord> aRecords = await resolver.ResolveAsync<ARecord>(name, token: token);
+			List<ARecord> aRecords = await resolver.ResolveAsync<ARecord>(name, token: token).ConfigureAwait(false);
 			if (aRecords != null)
 				result.AddRange(aRecords.Select(x => x.Address));
 
@@ -103,6 +106,7 @@ namespace DnsToolkit.Net.Dns
 		/// <param name="resolver"> The resolver instance, that should be used for queries </param>
 		/// <param name="address"> The address, that should be queried </param>
 		/// <returns> The reverse name of the IP address </returns>
+		[Obsolete("Blocks the calling thread while waiting for the DNS responses. Use ResolvePtrAsync instead.")]
 		public static DomainName? ResolvePtr(this IDnsResolver resolver, IPAddress address)
 		{
 			List<PtrRecord> ptrRecords = resolver.Resolve<PtrRecord>(address.GetReverseLookupDomain(), RecordType.Ptr);
@@ -118,7 +122,7 @@ namespace DnsToolkit.Net.Dns
 		/// <returns> The reverse name of the IP address </returns>
 		public static async Task<DomainName?> ResolvePtrAsync(this IDnsResolver resolver, IPAddress address, CancellationToken token = default(CancellationToken))
 		{
-			List<PtrRecord> ptrRecords = await resolver.ResolveAsync<PtrRecord>(address.GetReverseLookupDomain(), RecordType.Ptr, token: token);
+			List<PtrRecord> ptrRecords = await resolver.ResolveAsync<PtrRecord>(address.GetReverseLookupDomain(), RecordType.Ptr, token: token).ConfigureAwait(false);
 			return ptrRecords.Select(x => x.PointerDomainName).FirstOrDefault();
 		}
 
@@ -131,6 +135,7 @@ namespace DnsToolkit.Net.Dns
 		/// <param name="recordType"> Type the should be queried </param>
 		/// <param name="recordClass"> Class the should be queried </param>
 		/// <returns> A list of matching <see cref="DnsRecordBase">records</see> </returns>
+		[Obsolete("Blocks the calling thread while waiting for the DNS responses. Use ResolveAsync instead.")]
 		public static List<T> Resolve<T>(this IDnsResolver resolver, string name, RecordType recordType = RecordType.A, RecordClass recordClass = RecordClass.INet)
 			where T : DnsRecordBase
 		{

@@ -1,5 +1,6 @@
 #region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
+// Modifications Copyright 2026 Matheis1992
 // 
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
 // 
@@ -24,52 +25,222 @@ using System.Threading.Channels;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
-using Microsoft.Extensions.Configuration;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 namespace DnsToolkit.Net.Dns;
 
-public class HttpsServerTransport : IServerTransport
+public class HttpsServerTransport : IAsyncClosableServerTransport, IAsyncDisposable
 {
-	private readonly WebApplication _app;
+	// Kestrel is configured when the server starts, so later changes of the options must not have an effect
+	private readonly X509Certificate2 _cert;
+	private readonly IPAddress? _address;
+	private readonly int _port;
+	private readonly string _path;
+	private readonly SslProtocols _sslProtocols;
+	private readonly TimeSpan _shutdownTimeout;
+	private readonly long? _maxConcurrentConnections;
+	private readonly int _maxQueuedRequests;
+	private readonly Action<KestrelServerOptions>? _configureKestrel;
 
-	private readonly Channel<HttpsServerConnection> _connectionQueue = Channel.CreateUnbounded<HttpsServerConnection>();
+	private readonly object _lock = new();
+	private bool _isDisposed;
 
-	public HttpsServerTransport(X509Certificate2 cert, int port = 443)
+	// A web application cannot be started again after it was stopped, so every bind creates a new one.
+	// Null, if the transport is not bound.
+	private Run? _run;
+
+	private sealed class Run
 	{
-		var builder = WebApplication.CreateBuilder();
+		public Run(WebApplication app, Channel<HttpsServerConnection> connectionQueue)
+		{
+			App = app;
+			ConnectionQueue = connectionQueue;
+		}
 
-		builder.Configuration.AddInMemoryCollection(new Dictionary<string, string>());
-		builder.Host.ConfigureHostConfiguration(c => { });
-		builder.Host.ConfigureAppConfiguration(c => { });
+		public WebApplication App { get; }
+
+		public Channel<HttpsServerConnection> ConnectionQueue { get; }
+	}
+
+	/// <summary>
+	///   Creates a new instance of the HttpsServerTransport, which listens on all interfaces
+	/// </summary>
+	/// <param name="cert">The certificate of the server</param>
+	/// <param name="port">The port on which the transport should listen</param>
+	public HttpsServerTransport(X509Certificate2 cert, int port = 443)
+		: this(cert, new HttpsServerTransportOptions { Port = port }) { }
+
+	/// <summary>
+	///   Creates a new instance of the HttpsServerTransport
+	/// </summary>
+	/// <param name="cert">The certificate of the server</param>
+	/// <param name="endpoint">The IP endpoint on which the transport should listen</param>
+	public HttpsServerTransport(X509Certificate2 cert, IPEndPoint endpoint)
+		: this(cert, new HttpsServerTransportOptions { Address = endpoint.Address, Port = endpoint.Port }) { }
+
+	/// <summary>
+	///   Creates a new instance of the HttpsServerTransport
+	/// </summary>
+	/// <param name="cert">The certificate of the server</param>
+	/// <param name="options">The settings of the server, every setting which is not set keeps its default</param>
+	public HttpsServerTransport(X509Certificate2 cert, HttpsServerTransportOptions options)
+	{
+		_cert = cert;
+		_address = options.Address;
+		_port = options.Port;
+		_path = options.Path;
+		_sslProtocols = options.SslProtocols;
+		_shutdownTimeout = options.ShutdownTimeout;
+		_maxConcurrentConnections = options.MaxConcurrentConnections;
+		_maxQueuedRequests = options.MaxQueuedRequests;
+		_configureKestrel = options.ConfigureKestrel;
+	}
+
+	private WebApplication CreateApplication(Channel<HttpsServerConnection> connectionQueue)
+	{
+		// The empty builder does not read the configuration of the hosting application (appsettings.json, environment variables),
+		// only the given options are used. Otherwise the configuration could e.g. add further endpoints (Kestrel:Endpoints),
+		// reject requests by host name (AllowedHosts) or send stack traces to the clients (ASPNETCORE_ENVIRONMENT=Development).
+		var builder = WebApplication.CreateEmptyBuilder(new WebApplicationOptions());
+
+		var cert = _cert;
+		var address = _address;
+		var port = _port;
+		var sslProtocols = _sslProtocols;
+		var shutdownTimeout = _shutdownTimeout;
+		var maxConcurrentConnections = _maxConcurrentConnections;
+		var configureKestrel = _configureKestrel;
+
+		builder.WebHost.UseKestrelCore();
+		builder.WebHost.UseKestrelHttpsConfiguration();
 		builder.WebHost.ConfigureKestrel(kestrel =>
 		{
 			kestrel.ConfigureHttpsDefaults(https =>
 			{
-				https.SslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13;
+				https.SslProtocols = sslProtocols;
 				https.ServerCertificate = cert;
 			});
-			kestrel.ListenAnyIP(port, listen => listen.UseHttps());
-		});
-		builder.Logging.ClearProviders();
 
-		_app = builder.Build();
-		_app.UseStatusCodePages();
-		_app.MapDnsOverHttps("dns-query", HandleRequest);
+			// Kestrel itself does not limit the connections, which would allow a client to exhaust the server
+			kestrel.Limits.MaxConcurrentConnections = maxConcurrentConnections;
+
+			if (address == null)
+			{
+				kestrel.ListenAnyIP(port, listen => listen.UseHttps());
+			}
+			else
+			{
+				kestrel.Listen(address, port, listen => listen.UseHttps());
+			}
+
+			// called last, so the developer can change every setting
+			configureKestrel?.Invoke(kestrel);
+		});
+
+		builder.Services.AddRouting();
+		builder.Services.AddLogging();
+		builder.Services.Configure<HostOptions>(hostOptions => hostOptions.ShutdownTimeout = shutdownTimeout);
+
+		var app = builder.Build();
+		app.UseStatusCodePages();
+		app.MapDnsOverHttps(_path, (DnsReceivedRawPackage query, HttpContext context, CancellationToken token) => HandleRequest(connectionQueue, query, context, token));
+		return app;
 	}
 
-	private async Task<DnsRawPackage?> HandleRequest(DnsReceivedRawPackage query, HttpContext context, CancellationToken token)
+	private async Task<DnsRawPackage?> HandleRequest(Channel<HttpsServerConnection> connectionQueue, DnsReceivedRawPackage query, HttpContext context, CancellationToken token)
 	{
-		var tcs = new TaskCompletionSource<DnsRawPackage?>();
+		var tcs = new TaskCompletionSource<DnsRawPackage?>(TaskCreationOptions.RunContinuationsAsynchronously);
 		var connection = new HttpsServerConnection(this, query, tcs);
-		await _connectionQueue.Writer.WriteAsync(connection, token);
-		return await tcs.Task.WaitAsync(token);
+
+		// writing fails, if the queue is full or the transport is closing
+		if (!connectionQueue.Writer.TryWrite(connection))
+			throw new EndpointRouteBuilderExtensions.ServiceUnavailableException();
+
+		try
+		{
+			return await tcs.Task.WaitAsync(token).ConfigureAwait(false);
+		}
+		catch (OperationCanceledException) when (token.IsCancellationRequested)
+		{
+			// the client aborted the request, so the server skips it, if it is still queued
+			connection.Abandon();
+			Interlocked.Increment(ref _abandonedRequests);
+			throw;
+		}
+	}
+
+	private int _abandonedRequests;
+
+	/// <summary>
+	///   The number of requests, which the clients aborted, before they were answered
+	/// </summary>
+	internal int AbandonedRequests => Volatile.Read(ref _abandonedRequests);
+
+	/// <summary>
+	///   The number of requests, which wait for the DNS server to take them, including the abandoned ones
+	/// </summary>
+	internal int QueuedRequests => Volatile.Read(ref _run)?.ConnectionQueue.Reader.Count ?? 0;
+
+	/// <summary>
+	///   Rejects the requests, which were not passed to the server yet, and all further requests. Otherwise they would wait
+	///   until the shutdown timeout of the web server, as the server does not accept connections anymore when it is stopping.
+	/// </summary>
+	private static void RejectQueuedRequests(Channel<HttpsServerConnection> connectionQueue)
+	{
+		connectionQueue.Writer.TryComplete();
+
+		while (connectionQueue.Reader.TryRead(out var connection))
+		{
+			connection.Reject();
+		}
+	}
+
+	/// <summary>
+	///   Ends the current run, so the transport can be bound again
+	/// </summary>
+	/// <returns>The run, which has to be stopped and disposed, or null if the transport was not bound</returns>
+	private Run? TakeRun(bool dispose = false)
+	{
+		Run? run;
+
+		lock (_lock)
+		{
+			if (dispose)
+				_isDisposed = true;
+
+			run = _run;
+			_run = null;
+		}
+
+		if (run != null)
+			RejectQueuedRequests(run.ConnectionQueue);
+
+		return run;
 	}
 
 	public void Dispose()
 	{
-		_app.TryDispose();
+		// disposing stops the web server as well
+		TakeRun(dispose: true)?.App.TryDispose();
+	}
+
+	public async ValueTask DisposeAsync()
+	{
+		var run = TakeRun(dispose: true);
+		if (run == null)
+			return;
+
+		try
+		{
+			await run.App.DisposeAsync().ConfigureAwait(false);
+		}
+		catch
+		{
+			// like TryDispose, disposing must not fail
+		}
 	}
 
 	public ushort DefaultAllowedResponseSize => ushort.MaxValue;
@@ -78,20 +249,110 @@ public class HttpsServerTransport : IServerTransport
 
 	public TransportProtocol TransportProtocol => TransportProtocol.Https;
 
+	/// <summary>
+	///   Starts the web server. Like the other transports, it throws if the server cannot listen, e.g. because the port is in use.
+	///   After the transport was closed, it can be bound again.
+	/// </summary>
+	/// <exception cref="ObjectDisposedException">The transport was disposed</exception>
+	/// <exception cref="InvalidOperationException">The transport is already bound</exception>
 	public void Bind()
 	{
-		_app.RunAsync();
+		lock (_lock)
+		{
+			if (_isDisposed)
+				throw new ObjectDisposedException(GetType().FullName);
+
+			if (_run != null)
+				throw new InvalidOperationException("The transport is already bound");
+
+			// With HTTP/2 a client can send many requests on one connection, so the limit of the connections does not limit the
+			// requests. The queue is bounded, so a full queue rejects further requests instead of growing without limit.
+			var connectionQueue = Channel.CreateBounded<HttpsServerConnection>(new BoundedChannelOptions(_maxQueuedRequests) { FullMode = BoundedChannelFullMode.Wait });
+			var app = CreateApplication(connectionQueue);
+
+			try
+			{
+				app.StartAsync().GetAwaiter().GetResult();
+			}
+			catch
+			{
+				app.TryDispose();
+				throw;
+			}
+
+			_run = new Run(app, connectionQueue);
+		}
 	}
 
+	/// <summary>
+	///   Stops the web server. The requests, which were not passed to the server yet, are rejected with 503 Service Unavailable.
+	///   The requests in progress get up to the shutdown timeout to complete.
+	/// </summary>
 	public void Close()
 	{
-		_app.StopAsync();
+		var run = TakeRun();
+		if (run == null)
+			return;
+
+		try
+		{
+			run.App.StopAsync().GetAwaiter().GetResult();
+		}
+		finally
+		{
+			run.App.TryDispose();
+		}
 	}
 
+	/// <summary>
+	///   Stops the web server. The requests, which were not passed to the server yet, are rejected with 503 Service Unavailable.
+	///   The requests in progress get up to the shutdown timeout to complete.
+	/// </summary>
+	/// <param name="token">The token to indicate, that stopping should no longer be graceful</param>
+	public async Task CloseAsync(CancellationToken token = default)
+	{
+		var run = TakeRun();
+		if (run == null)
+			return;
+
+		try
+		{
+			await run.App.StopAsync(token).ConfigureAwait(false);
+		}
+		finally
+		{
+			try
+			{
+				await run.App.DisposeAsync().ConfigureAwait(false);
+			}
+			catch
+			{
+				// like TryDispose, disposing must not fail
+			}
+		}
+	}
+
+	/// <summary>
+	///   Waits for the next request and returns it as connection
+	/// </summary>
+	/// <param name="token"> The token to monitor cancellation requests </param>
+	/// <returns>The next request, or null if the transport was closed meanwhile</returns>
+	/// <exception cref="InvalidOperationException">The transport is not bound</exception>
 	public async Task<IServerConnection?> AcceptConnectionAsync(CancellationToken token = default)
 	{
-		await _connectionQueue.Reader.WaitToReadAsync(token);
-		return _connectionQueue.Reader.TryRead(out var connection) ? connection : null;
+		var connectionQueue = Volatile.Read(ref _run)?.ConnectionQueue ?? throw new InvalidOperationException("The transport is not bound");
+
+		while (await connectionQueue.Reader.WaitToReadAsync(token).ConfigureAwait(false))
+		{
+			while (connectionQueue.Reader.TryRead(out var connection))
+			{
+				// the requests, which the clients aborted while they were queued, are not processed anymore
+				if (!connection.IsAbandoned)
+					return connection;
+			}
+		}
+
+		return null;
 	}
 
 	private class HttpsServerConnection : IServerConnection
@@ -109,6 +370,21 @@ public class HttpsServerTransport : IServerTransport
 		public void Dispose()
 		{
 			_tcs.TrySetResult(null);
+		}
+
+		public void Reject()
+		{
+			_tcs.TrySetException(new EndpointRouteBuilderExtensions.ServiceUnavailableException());
+		}
+
+		/// <summary>
+		///   True, if the client aborted the request
+		/// </summary>
+		public bool IsAbandoned => _tcs.Task.IsCanceled;
+
+		public void Abandon()
+		{
+			_tcs.TrySetCanceled();
 		}
 
 		public IServerTransport Transport { get; }

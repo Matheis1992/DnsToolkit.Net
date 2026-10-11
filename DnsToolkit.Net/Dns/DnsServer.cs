@@ -1,5 +1,6 @@
 ﻿#region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
+// Modifications Copyright 2026 Matheis1992
 // 
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
 // 
@@ -31,7 +32,7 @@ namespace DnsToolkit.Net.Dns
 	/// <summary>
 	///   Provides a base dns server interface
 	/// </summary>
-	public class DnsServer : IDisposable
+	public class DnsServer : IDisposable, IAsyncDisposable
 	{
 		/// <summary>
 		///   Represents the method, that will be called to get the keydata for processing a tsig signed message
@@ -46,7 +47,30 @@ namespace DnsToolkit.Net.Dns
 
 		private readonly IServerTransport[] _transports;
 		private Task[] _transportTasks = Array.Empty<Task>();
+		// canceled when stopping: no further connections are accepted and no further queries are read
 		private CancellationTokenSource _serverCancellationTokenSource = new();
+
+		// canceled when stopping is no longer graceful: the responses to the queries in progress are not sent anymore
+		private CancellationTokenSource _abortCancellationTokenSource = new();
+
+		private readonly ActiveConnections _activeConnections = new();
+
+		/// <summary>
+		///   The time, after which <see cref="Stop" /> and disposing abort the remaining connections
+		/// </summary>
+		internal TimeSpan StopTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+		// serializes starting and stopping
+		private readonly object _lifecycleLock = new();
+
+		private bool _isStarted;
+
+		// the stop of the current run, which all callers of Stop, StopAsync and Dispose wait for
+		private Task<bool>? _stopTask;
+
+		private int _isDisposed;
+
+		private bool IsDisposed => Volatile.Read(ref _isDisposed) != 0;
 
 		/// <summary>
 		///   Method that will be called to get the keydata for processing a tsig signed message
@@ -76,59 +100,415 @@ namespace DnsToolkit.Net.Dns
 		}
 
 		/// <summary>
-		///   Starts the server
+		///   The maximum number of connections each transport processes at the same time. For UDP every query counts
+		///   as a connection. If the limit is reached, a transport accepts the next connection only after another one
+		///   was closed, so clients wait in the backlog of the operating system. The limit applies to each transport
+		///   separately, so e.g. idle TCP connections cannot block UDP. It has to be set before the server is started.
+		///   Default: 1000
 		/// </summary>
+		public int MaxConcurrentConnectionsPerTransport
+		{
+			get => _maxConcurrentConnectionsPerTransport;
+			set
+			{
+				if (value < 1)
+					throw new ArgumentOutOfRangeException(nameof(value), "At least one connection has to be allowed");
+
+				_maxConcurrentConnectionsPerTransport = value;
+			}
+		}
+
+		private int _maxConcurrentConnectionsPerTransport = 1000;
+
+		/// <summary>
+		///   The maximum number of queries of one connection, which are processed at the same time, e.g. the queries pipelined
+		///   by a client over TCP or TLS. If the limit is reached, the next query of the connection is read only after another
+		///   one was answered, so the client waits. Otherwise, a single connection could start any number of queries, although
+		///   it counts as one connection only. It has to be set before the server is started.
+		///   Default: 100
+		/// </summary>
+		public int MaxConcurrentQueriesPerConnection
+		{
+			get => _maxConcurrentQueriesPerConnection;
+			set
+			{
+				if (value < 1)
+					throw new ArgumentOutOfRangeException(nameof(value), "At least one query has to be allowed");
+
+				_maxConcurrentQueriesPerConnection = value;
+			}
+		}
+
+		private int _maxConcurrentQueriesPerConnection = 100;
+
+		/// <summary>
+		///   Starts the server. After it was stopped, it can be started again, if its transports can be bound again after
+		///   they were closed, like all transports of this library.
+		/// </summary>
+		/// <exception cref="ObjectDisposedException">The server was disposed</exception>
+		/// <exception cref="InvalidOperationException">The server is already started or still stopping</exception>
 		public void Start()
 		{
-			foreach (var transport in _transports)
+			lock (_lifecycleLock)
 			{
-				transport.Bind();
+				if (IsDisposed)
+					throw new ObjectDisposedException(GetType().FullName);
+
+				if (_isStarted)
+					throw new InvalidOperationException("The server is already started");
+
+				if (_stopTask is { IsCompleted: false })
+					throw new InvalidOperationException("The server is still stopping");
+
+				BindTransports();
+
+				_serverCancellationTokenSource = new CancellationTokenSource();
+				_abortCancellationTokenSource = new CancellationTokenSource();
+
+				var token = _serverCancellationTokenSource.Token;
+				var abortToken = _abortCancellationTokenSource.Token;
+				var maxConnections = MaxConcurrentConnectionsPerTransport;
+				var maxQueriesPerConnection = MaxConcurrentQueriesPerConnection;
+				_transportTasks = _transports.Select(t => Task.Run(() => ConnectionLoopAsync(t, maxConnections, maxQueriesPerConnection, token, abortToken))).ToArray();
+
+				_isStarted = true;
+				_stopTask = null;
 			}
-
-			_serverCancellationTokenSource = new CancellationTokenSource();
-
-			_transportTasks = _transports.Select<IServerTransport, Task>(t =>
-				Task.Run(() => ConnectionLoopAsync(t, _serverCancellationTokenSource.Token), _serverCancellationTokenSource.Token)).ToArray();
 		}
 
 		/// <summary>
-		///   Stops the server
+		///   Binds all transports. If one of them fails, e.g. because its port is in use, the transports which were bound
+		///   already are closed again, so they do not keep their ports until the server is disposed.
 		/// </summary>
-		public void Stop()
+		private void BindTransports()
 		{
-			_serverCancellationTokenSource.Cancel();
-
-			Task.WaitAll(_transportTasks);
-
-			foreach (var transport in _transports)
+			for (var i = 0; i < _transports.Length; i++)
 			{
-				transport.Close();
+				try
+				{
+					_transports[i].Bind();
+				}
+				catch
+				{
+					for (var bound = 0; bound < i; bound++)
+					{
+						try
+						{
+							_transports[bound].Close();
+						}
+						catch
+						{
+							// the exception of the failed transport is more relevant
+						}
+					}
+
+					throw;
+				}
 			}
 		}
 
-		private async void ConnectionLoopAsync(IServerTransport transport, CancellationToken token)
+		/// <summary>
+		///   Stops the server gracefully: no further connections and queries are accepted, idle connections are closed
+		///   immediately and the queries in progress are answered, before the transports are closed. If this takes
+		///   longer than 5 seconds, the remaining connections are aborted. If the server is already stopping, it
+		///   waits for that stop.
+		/// </summary>
+		public void Stop()
 		{
+			using var timeoutCts = new CancellationTokenSource(StopTimeout);
+
+			try
+			{
+				// The stop does not continue on the context of the caller, so blocking here cannot deadlock
+				StopCoreAsync(isAsync: false, timeoutCts.Token).GetAwaiter().GetResult();
+			}
+			catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
+			{
+				// the remaining connections were aborted
+			}
+		}
+
+		/// <summary>
+		///   Stops the server gracefully: no further connections and queries are accepted, idle connections are closed
+		///   immediately and the queries in progress are answered, before the transports are closed. If the server is
+		///   already stopping, it waits for that stop.
+		/// </summary>
+		/// <param name="token">
+		///   The token to indicate, that stopping should no longer be graceful. The remaining connections are aborted
+		///   then and the transports are closed immediately.
+		/// </param>
+		/// <exception cref="OperationCanceledException">The token was canceled, so the server was not stopped gracefully</exception>
+		public Task StopAsync(CancellationToken token = default)
+		{
+			return StopCoreAsync(isAsync: true, token);
+		}
+
+		private async Task StopCoreAsync(bool isAsync, CancellationToken token)
+		{
+			Task<bool> stopTask;
+			CancellationTokenSource abortCancellationTokenSource;
+
+			lock (_lifecycleLock)
+			{
+				_isStarted = false;
+				abortCancellationTokenSource = _abortCancellationTokenSource;
+
+				if (_stopTask == null)
+				{
+					// All callers wait for the same stop, so stopping concurrently or again does not close the transports twice.
+					// It is not started within the lock, as canceling the tokens runs the registered callbacks.
+					var serverCancellationTokenSource = _serverCancellationTokenSource;
+					var transportTasks = _transportTasks;
+					_stopTask = Task.Run(() => StopOnceAsync(isAsync, serverCancellationTokenSource, abortCancellationTokenSource, transportTasks));
+				}
+
+				stopTask = _stopTask;
+			}
+
+			bool isGraceful;
+
+			// the token of every caller can end the graceful stop
+			using (token.Register(() => TryCancel(abortCancellationTokenSource)))
+			{
+				isGraceful = await stopTask.ConfigureAwait(false);
+			}
+
+			if (!isGraceful)
+				token.ThrowIfCancellationRequested();
+		}
+
+		private async Task<bool> StopOnceAsync(bool isAsync, CancellationTokenSource serverCancellationTokenSource, CancellationTokenSource abortCancellationTokenSource, Task[] transportTasks)
+		{
+			// no further connections are accepted and no further queries are read, so idle connections are closed
+			serverCancellationTokenSource.Cancel();
+
+			var isGraceful = false;
+			try
+			{
+				// the transports are still open, so the queries in progress can be answered
+				await WhenNoConnectionsAsync(transportTasks, _activeConnections).WaitAsync(abortCancellationTokenSource.Token).ConfigureAwait(false);
+				isGraceful = true;
+			}
+			catch (OperationCanceledException) when (abortCancellationTokenSource.IsCancellationRequested)
+			{
+				// a caller canceled its token, so stopping is no longer graceful
+			}
+			finally
+			{
+				if (!isGraceful)
+				{
+					abortCancellationTokenSource.Cancel();
+					_activeConnections.DisposeAll();
+				}
+
+				await CloseTransportsAsync(isAsync, abortCancellationTokenSource.Token).ConfigureAwait(false);
+			}
+
+			return isGraceful;
+		}
+
+		private static void TryCancel(CancellationTokenSource cancellationTokenSource)
+		{
+			try
+			{
+				cancellationTokenSource.Cancel();
+			}
+			catch (ObjectDisposedException)
+			{
+				// the server was disposed meanwhile, so it is stopped already
+			}
+		}
+
+		private static async Task WhenNoConnectionsAsync(Task[] transportTasks, ActiveConnections activeConnections)
+		{
+			// no connection is added after the connection loops ended
+			await Task.WhenAll(transportTasks).ConfigureAwait(false);
+			await activeConnections.WhenNoneAsync().ConfigureAwait(false);
+		}
+
+		private async Task CloseTransportsAsync(bool isAsync, CancellationToken token)
+		{
+			// Every transport is closed, even if closing another one failed. Otherwise, the remaining transports would keep
+			// their ports, so the server could not be started again.
+			foreach (var transport in _transports)
+			{
+				try
+				{
+					if (isAsync && (transport is IAsyncClosableServerTransport asyncTransport))
+					{
+						await asyncTransport.CloseAsync(token).ConfigureAwait(false);
+					}
+					else
+					{
+						transport.Close();
+					}
+				}
+				catch (OperationCanceledException) when (token.IsCancellationRequested)
+				{
+					// the stop was aborted, so the transport was closed without waiting for its requests in progress
+				}
+				catch (Exception ex)
+				{
+					OnExceptionThrownAsync(ex);
+				}
+			}
+		}
+
+		/// <summary>
+		///   The connections in progress of all transports
+		/// </summary>
+		private sealed class ActiveConnections
+		{
+			private readonly HashSet<IServerConnection> _connections = new();
+			private TaskCompletionSource<bool>? _none;
+
+			public void Add(IServerConnection connection)
+			{
+				lock (_connections)
+				{
+					_connections.Add(connection);
+				}
+			}
+
+			public void Remove(IServerConnection connection)
+			{
+				TaskCompletionSource<bool>? none = null;
+
+				lock (_connections)
+				{
+					if (_connections.Remove(connection) && (_connections.Count == 0))
+					{
+						none = _none;
+						_none = null;
+					}
+				}
+
+				none?.TrySetResult(true);
+			}
+
+			public Task WhenNoneAsync()
+			{
+				lock (_connections)
+				{
+					if (_connections.Count == 0)
+						return Task.CompletedTask;
+
+					return (_none ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
+				}
+			}
+
+			/// <summary>
+			///   Aborts all connections, so pending reads and writes end. The connections are removed once their processing ended.
+			/// </summary>
+			public void DisposeAll()
+			{
+				List<IServerConnection> connections;
+				lock (_connections)
+				{
+					connections = _connections.ToList();
+				}
+
+				foreach (var connection in connections)
+					connection.TryDispose();
+			}
+		}
+
+		private async Task ConnectionLoopAsync(IServerTransport transport, int maxConnections, int maxQueriesPerConnection, CancellationToken token, CancellationToken abortToken)
+		{
+			var failedAcceptCount = 0;
+
+			// One slot per connection in progress. It is not disposed, as connections may still release their slot after the loop ended.
+			var connectionSlots = new SemaphoreSlim(maxConnections, maxConnections);
+
 			while (!token.IsCancellationRequested)
 			{
-				var connection = await transport.AcceptConnectionAsync(token);
+				try
+				{
+					// wait for a free slot before accepting, so the backlog of the operating system holds further clients
+					await connectionSlots.WaitAsync(token).ConfigureAwait(false);
+				}
+				catch (OperationCanceledException)
+				{
+					break;
+				}
+
+				IServerConnection? connection;
+
+				try
+				{
+					connection = await transport.AcceptConnectionAsync(token).ConfigureAwait(false);
+				}
+				catch (Exception) when (token.IsCancellationRequested)
+				{
+					// the server is stopping, the transport may fail as it is closed
+					connectionSlots.Release();
+					break;
+				}
+				catch (Exception ex)
+				{
+					OnExceptionThrownAsync(ex);
+					connection = null;
+				}
 
 				if (connection == null)
-					continue;
+				{
+					connectionSlots.Release();
 
-#pragma warning disable CS4014
-				Task.Run(() => ProcessConnectionAsync(connection, token), token);
-#pragma warning restore CS4014
+					// The transports handle errors of single clients themselves, so this is a failure of the transport itself.
+					// A transport which fails permanently fails immediately again, so wait longer after each failure.
+					try
+					{
+						await Task.Delay(GetFailedAcceptDelay(++failedAcceptCount), token).ConfigureAwait(false);
+					}
+					catch (OperationCanceledException)
+					{
+						break;
+					}
+
+					continue;
+				}
+
+				failedAcceptCount = 0;
+
+				// tracked until it is disposed, so stopping the server can wait for it or abort it
+				_activeConnections.Add(connection);
+
+				// Not bound to the token, as the connection has to be disposed and its slot released in any case
+				_ = Task.Run(() => ProcessConnectionAsync(connection, () =>
+				{
+					connectionSlots.Release();
+					_activeConnections.Remove(connection);
+				}, maxQueriesPerConnection, token, abortToken));
 			}
+		}
+
+		private static readonly TimeSpan _maxFailedAcceptDelay = TimeSpan.FromMilliseconds(100);
+
+		/// <summary>
+		///   The delay after consecutive failed accepts: none after the first failure, then 1 ms doubled with each failure,
+		///   up to 100 ms. A single failure costs nothing, a transport which fails permanently is retried ten times a second.
+		/// </summary>
+		internal static TimeSpan GetFailedAcceptDelay(int failedAcceptCount)
+		{
+			if (failedAcceptCount <= 1)
+				return TimeSpan.Zero;
+
+			// 2^(count - 2) ms, the exponent is limited to avoid an overflow
+			var delay = TimeSpan.FromMilliseconds(1 << Math.Min(failedAcceptCount - 2, 16));
+			return delay < _maxFailedAcceptDelay ? delay : _maxFailedAcceptDelay;
 		}
 
 		private class RefCountDispose
 		{
 			private int _count = 0;
+			private int _isDisposed = 0;
 			private readonly IDisposable _disposable;
+			private readonly Action _onDisposed;
 
-			public RefCountDispose(IDisposable disposable)
+			public RefCountDispose(IDisposable disposable, Action onDisposed)
 			{
 				_disposable = disposable;
+				_onDisposed = onDisposed;
 			}
 
 			public void Increment()
@@ -138,47 +518,81 @@ namespace DnsToolkit.Net.Dns
 
 			public void Decrement()
 			{
-				if (Interlocked.Decrement(ref _count) <= 0)
+				if ((Interlocked.Decrement(ref _count) <= 0) && (Interlocked.Exchange(ref _isDisposed, 1) == 0))
+				{
 					_disposable.TryDispose();
+					_onDisposed();
+				}
 			}
 		}
 
-		private async void ProcessConnectionAsync(IServerConnection connection, CancellationToken token)
+		private async Task ProcessConnectionAsync(IServerConnection connection, Action onDisposed, int maxQueries, CancellationToken token, CancellationToken abortToken)
 		{
-			var refCount = new RefCountDispose(connection);
+			// The receive loop holds one reference and every query in progress holds another one,
+			// so the connection is disposed after the loop ended and all queries are answered
+			var refCount = new RefCountDispose(connection, onDisposed);
+			refCount.Increment();
+
+			// One slot per query in progress. It is not disposed, as queries may still release their slot after the loop ended.
+			// A UDP datagram or an HTTPS request carries a single query, so it needs no slots
+			var querySlots = connection.Transport.TransportProtocol is TransportProtocol.Udp or TransportProtocol.Https
+				? null
+				: new SemaphoreSlim(maxQueries, maxQueries);
 
 			try
 			{
 				var clientConnectedEventArgs = new ClientConnectedEventArgs(connection.Transport.TransportProtocol, connection.RemoteEndPoint, connection.LocalEndPoint);
-				await ClientConnected.RaiseAsync(this, clientConnectedEventArgs);
+				await ClientConnected.RaiseAsync(this, clientConnectedEventArgs).ConfigureAwait(false);
 
 				if (clientConnectedEventArgs.RefuseConnect)
 					return;
 
-				if (!await connection.InitializeAsync(token))
+				if (!await connection.InitializeAsync(token).ConfigureAwait(false))
 					return;
+
+				// Canceled, when the server stops or a query ends the connection, e.g. a TSIG signed one. No further queries are
+				// read then, but the ones in progress are still answered, before the connection is closed.
+				using var readCts = CancellationTokenSource.CreateLinkedTokenSource(token);
 
 				while (connection.CanRead)
 				{
-					refCount.Increment();
-					var queryPackage = await connection.ReceiveAsync(token);
+					// the next query is read only, if it can be processed, so the client waits meanwhile
+					try
+					{
+						if (querySlots != null)
+							await querySlots.WaitAsync(readCts.Token).ConfigureAwait(false);
+					}
+					catch (OperationCanceledException) when (readCts.IsCancellationRequested)
+					{
+						break;
+					}
+
+					var queryPackage = await connection.ReceiveAsync(readCts.Token).ConfigureAwait(false);
 
 					if (queryPackage == null)
+					{
+						querySlots?.Release();
 						break;
+					}
 
-#pragma warning disable CS4014
-					Task.Run(() => ProcessRawPackageAsync(connection, queryPackage, refCount, token), token);
-#pragma warning restore CS4014
+					refCount.Increment();
+
+					// Not bound to a token, as ProcessRawPackageAsync has to release its reference and its slot in any case.
+					// It sends the response also while the server is stopping, only aborting the stop cancels it.
+					_ = Task.Run(() => ProcessRawPackageAsync(connection, queryPackage, refCount, querySlots, readCts, abortToken));
 				}
 			}
 			catch (Exception ex)
 			{
 				OnExceptionThrownAsync(ex);
+			}
+			finally
+			{
 				refCount.Decrement();
 			}
 		}
 
-		private async Task ProcessRawPackageAsync(IServerConnection connection, DnsReceivedRawPackage queryPackage, RefCountDispose refCount, CancellationToken token)
+		private async Task ProcessRawPackageAsync(IServerConnection connection, DnsReceivedRawPackage queryPackage, RefCountDispose refCount, SemaphoreSlim? querySlots, CancellationTokenSource readCts, CancellationToken abortToken)
 		{
 			try
 			{
@@ -197,7 +611,7 @@ namespace DnsToolkit.Net.Dns
 				DnsMessageBase response;
 				try
 				{
-					response = await ProcessMessageAsync(query, connection.Transport.TransportProtocol, connection.RemoteEndPoint!);
+					response = await ProcessMessageAsync(query, connection.Transport.TransportProtocol, connection.RemoteEndPoint!).ConfigureAwait(false);
 				}
 				catch (Exception ex)
 				{
@@ -210,7 +624,7 @@ namespace DnsToolkit.Net.Dns
 
 				if (responsePackage.Length <= connection.Transport.DefaultAllowedResponseSize)
 				{
-					await connection.SendAsync(responsePackage, token);
+					await connection.SendAsync(responsePackage, abortToken).ConfigureAwait(false);
 				}
 				else
 				{
@@ -221,7 +635,7 @@ namespace DnsToolkit.Net.Dns
 						foreach (var partialResponse in response.SplitResponse())
 						{
 							responsePackage = partialResponse.Encode(tsigMac, isSubSequentResponse, out newTsigMac);
-							await connection.SendAsync(responsePackage, token);
+							await connection.SendAsync(responsePackage, abortToken).ConfigureAwait(false);
 							isSubSequentResponse = true;
 							tsigMac = newTsigMac;
 						}
@@ -314,7 +728,7 @@ namespace DnsToolkit.Net.Dns
 						}
 						#endregion
 
-						await connection.SendAsync(responsePackage, token);
+						await connection.SendAsync(responsePackage, abortToken).ConfigureAwait(false);
 					}
 					else
 					{
@@ -323,13 +737,14 @@ namespace DnsToolkit.Net.Dns
 						response = query.CreateFailureResponse();
 
 						responsePackage = response.Encode(tsigMac, false, out newTsigMac);
-						await connection.SendAsync(responsePackage, token);
+						await connection.SendAsync(responsePackage, abortToken).ConfigureAwait(false);
 					}
 				}
 
-				// Since support for multiple tsig signed messages is not finished, just close connection after response to first signed query
+				// Since support for multiple tsig signed messages is not finished, the connection is closed after the response to the
+				// first signed query. No further queries are read, but the other queries in progress are still answered.
 				if (newTsigMac != null)
-					connection.Dispose();
+					TryCancel(readCts);
 			}
 			catch (Exception ex)
 			{
@@ -337,6 +752,10 @@ namespace DnsToolkit.Net.Dns
 			}
 			finally
 			{
+				// e.g. the keep alive of a TCP connection starts, once its last query is finished
+				(connection as IKeepAliveServerConnection)?.OnQueryFinished();
+
+				querySlots?.Release();
 				refCount.Decrement();
 			}
 		}
@@ -395,7 +814,7 @@ namespace DnsToolkit.Net.Dns
 			}
 
 			QueryReceivedEventArgs eventArgs = new QueryReceivedEventArgs(query, transportProtocol, remoteEndpoint);
-			await QueryReceived.RaiseAsync(this, eventArgs);
+			await QueryReceived.RaiseAsync(this, eventArgs).ConfigureAwait(false);
 			return eventArgs.Response ?? query.CreateFailureResponse();
 		}
 
@@ -428,9 +847,77 @@ namespace DnsToolkit.Net.Dns
 		/// </summary>
 		public event AsyncEventHandler<QueryReceivedEventArgs>? QueryReceived;
 
+		/// <summary>
+		///   Stops the server like <see cref="Stop" /> and disposes the transports
+		/// </summary>
 		void IDisposable.Dispose()
 		{
+			if (Interlocked.Exchange(ref _isDisposed, 1) != 0)
+				return;
+
+			// waits for a stop in progress as well, so nothing is disposed, which it still uses
 			Stop();
+
+			foreach (var transport in _transports)
+			{
+				transport.TryDispose();
+			}
+
+			DisposeCancellationTokenSources();
+		}
+
+		/// <summary>
+		///   Stops the server like <see cref="StopAsync" /> and disposes the transports. Like <see cref="Stop" />, the
+		///   remaining connections are aborted after 5 seconds.
+		/// </summary>
+		async ValueTask IAsyncDisposable.DisposeAsync()
+		{
+			if (Interlocked.Exchange(ref _isDisposed, 1) != 0)
+				return;
+
+			// waits for a stop in progress as well, so nothing is disposed, which it still uses
+			using (var timeoutCts = new CancellationTokenSource(StopTimeout))
+			{
+				try
+				{
+					await StopAsync(timeoutCts.Token).ConfigureAwait(false);
+				}
+				catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
+				{
+					// the remaining connections were aborted
+				}
+			}
+
+			foreach (var transport in _transports)
+			{
+				try
+				{
+					if (transport is IAsyncDisposable asyncDisposable)
+					{
+						await asyncDisposable.DisposeAsync().ConfigureAwait(false);
+					}
+					else
+					{
+						transport.Dispose();
+					}
+				}
+				catch
+				{
+					// like TryDispose, disposing must not fail
+				}
+			}
+
+			DisposeCancellationTokenSources();
+		}
+
+		/// <summary>
+		///   Disposed only together with the server, as the handlers of aborted queries can still use the tokens after stopping.
+		///   For the same reason the sources replaced by a restart are not disposed, they hold no timer or wait handle anyway.
+		/// </summary>
+		private void DisposeCancellationTokenSources()
+		{
+			_serverCancellationTokenSource.Dispose();
+			_abortCancellationTokenSource.Dispose();
 		}
 	}
 }

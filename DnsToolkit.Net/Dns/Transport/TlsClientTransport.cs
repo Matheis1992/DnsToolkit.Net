@@ -1,5 +1,6 @@
 #region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
+// Modifications Copyright 2026 Matheis1992
 //
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
 //
@@ -100,10 +101,10 @@ public class TlsClientTransport : TcpClientTransportBase<TlsClientTransport>
 			// AuthenticateAsClientAsync does not support cancellation on netstandard2.0, so abort the handshake by disposing the stream
 			using (token.Register(stream.Dispose))
 			{
-				await stream.AuthenticateAsClientAsync(_targetHost, _clientCertificates ?? new X509CertificateCollection(), _enabledSslProtocols, _checkCertificateRevocation);
+				await stream.AuthenticateAsClientAsync(_targetHost, _clientCertificates ?? new X509CertificateCollection(), _enabledSslProtocols, _checkCertificateRevocation).ConfigureAwait(false);
 			}
 #else
-			await stream.AuthenticateAsClientAsync(_sslClientAuthenticationOptions, token);
+			await stream.AuthenticateAsClientAsync(_sslClientAuthenticationOptions, token).ConfigureAwait(false);
 #endif
 			token.ThrowIfCancellationRequested();
 

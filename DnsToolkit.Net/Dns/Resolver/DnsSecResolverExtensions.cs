@@ -1,5 +1,6 @@
 ﻿#region Copyright and License
 // Copyright 2010..2024 Alexander Reinert
+// Modifications Copyright 2026 Matheis1992
 // 
 // This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
 // 
@@ -39,6 +40,7 @@ namespace DnsToolkit.Net.Dns
 		/// <param name="recordType"> Type the should be queried </param>
 		/// <param name="recordClass"> Class the should be queried </param>
 		/// <returns> The validating result and a list of matching <see cref="DnsRecordBase">records</see> </returns>
+		[Obsolete("Blocks the calling thread while waiting for the DNS responses. Use ResolveSecureAsync instead.")]
 		public static DnsSecResult<T> ResolveSecure<T>(this IDnsSecResolver resolver, string name, RecordType recordType = RecordType.A, RecordClass recordClass = RecordClass.INet)
 			where T : DnsRecordBase
 		{
