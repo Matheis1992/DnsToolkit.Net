@@ -1,7 +1,7 @@
 #region Copyright and License
-// Copyright 2010..2024 Alexander Reinert
+// Copyright 2026 Matheis1992
 //
-// This file is part of the ARSoft.Tools.Net - C# DNS client/server and SPF Library (https://github.com/alexreinert/ARSoft.Tools.Net)
+// This file is part of DnsToolkit.Net - C# DNS client/server and SPF Library (https://github.com/Matheis1992/DnsToolkit.Net)
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
