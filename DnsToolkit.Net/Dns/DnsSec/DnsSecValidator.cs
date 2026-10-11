@@ -183,6 +183,12 @@ namespace DnsToolkit.Net.Dns
 			if (validationResult != DnsSecValidationResult.Signed)
 				return validationResult;
 
+			// An NSEC record of a delegation point, which has the NS bit, but not the SOA bit, belongs to the parent zone. Except
+			// the missing DS record, it proves nothing about the child zone. Like the names below a DNAME record, the names below
+			// it are not in the zone, so the zone cannot deny them (RFC 4035, section 5.4, and RFC 6840, section 4.1).
+			static bool IsDelegationPoint(NSecRecord record) => record.Types.Contains(RecordType.Ns) && !record.Types.Contains(RecordType.Soa);
+			static bool IsZoneCut(NSecRecord record) => IsDelegationPoint(record) || record.Types.Contains(RecordType.DName);
+
 			DomainName current = name;
 
 			while (true)
@@ -195,11 +201,14 @@ namespace DnsToolkit.Net.Dns
 				NSecRecord? nsecRecord = nsecRecords.FirstOrDefault(x => x.Name.Equals(current));
 				if (nsecRecord != null)
 				{
+					if (current.Equals(name) ? (recordType != RecordType.Ds) && IsDelegationPoint(nsecRecord) : IsZoneCut(nsecRecord))
+						return DnsSecValidationResult.Bogus;
+
 					return nsecRecord.Types.Contains(recordType) ? DnsSecValidationResult.Bogus : DnsSecValidationResult.Signed;
 				}
 				else
 				{
-					nsecRecord = nsecRecords.FirstOrDefault(x => x.IsCovering(current, zoneApex));
+					nsecRecord = nsecRecords.FirstOrDefault(x => x.IsCovering(current, zoneApex) && !(IsZoneCut(x) && current.IsSubDomainOf(x.Name)));
 					if (nsecRecord == null)
 						return DnsSecValidationResult.Bogus;
 				}

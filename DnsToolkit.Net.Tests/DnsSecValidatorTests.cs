@@ -235,6 +235,44 @@ public class DnsSecValidatorTests
 	}
 
 	[Fact]
+	public async Task NSecOfADelegationPoint_DoesNotDenyTheNamesOfTheChildZone()
+	{
+		// the NSEC record of the parent zone covers the names of the child zone in the canonical order
+		var message = new DnsMessage { ReturnCode = ReturnCode.NxDomain };
+		AddSigned(message, new NSecRecord(_child, RecordClass.INet, 3600, DomainName.Parse("zz.example.test"), new List<RecordType> { RecordType.Ns, RecordType.RrSig, RecordType.NSec }));
+
+		Assert.Equal(DnsSecValidationResult.Bogus, await ValidateAsync(_childHost, message, new List<ARecord>()));
+	}
+
+	[Fact]
+	public async Task NSecOfAName_DeniesTheNamesBelowIt()
+	{
+		var message = new DnsMessage { ReturnCode = ReturnCode.NxDomain };
+		AddSigned(message, new NSecRecord(_child, RecordClass.INet, 3600, DomainName.Parse("zz.example.test"), new List<RecordType> { RecordType.Txt, RecordType.RrSig, RecordType.NSec }));
+
+		Assert.Equal(DnsSecValidationResult.Signed, await ValidateAsync(_childHost, message, new List<ARecord>()));
+	}
+
+	[Fact]
+	public async Task NSecOfADelegationPoint_DoesNotDenyOtherRecordsThanDs()
+	{
+		var message = new DnsMessage();
+		AddSigned(message, new NSecRecord(_child, RecordClass.INet, 3600, DomainName.Parse("zz.example.test"), new List<RecordType> { RecordType.Ns, RecordType.RrSig, RecordType.NSec }));
+
+		Assert.Equal(DnsSecValidationResult.Bogus, await ValidateAsync(_child, message, new List<ARecord>()));
+		Assert.Equal(DnsSecValidationResult.Signed, await CreateValidator(new[] { _key }).ValidateAsync(_child, RecordType.Ds, RecordClass.INet, message, new List<DsRecord>(), null, default));
+	}
+
+	[Fact]
+	public async Task NSecOfADName_DoesNotDenyTheNamesBelowIt()
+	{
+		var message = new DnsMessage { ReturnCode = ReturnCode.NxDomain };
+		AddSigned(message, new NSecRecord(_child, RecordClass.INet, 3600, DomainName.Parse("zz.example.test"), new List<RecordType> { RecordType.DName, RecordType.RrSig, RecordType.NSec }));
+
+		Assert.Equal(DnsSecValidationResult.Bogus, await ValidateAsync(_childHost, message, new List<ARecord>()));
+	}
+
+	[Fact]
 	public async Task NSec3WithAnUnknownHashAlgorithm_IsBogus()
 	{
 		// before, the validation threw, because no NSEC3 record with a supported hash algorithm was found
