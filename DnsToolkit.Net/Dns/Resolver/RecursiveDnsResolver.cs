@@ -39,7 +39,7 @@ namespace DnsToolkit.Net.Dns
 
 		private DnsCache _cache = new DnsCache();
 		private NameserverCache _nameserverCache = new NameserverCache();
-		private IClientTransport[] _transports = { new TcpClientTransport(), new UdpClientTransport() };
+		private readonly IClientTransport[] _transports;
 
 		private readonly IResolverHintStore _resolverHintStore;
 
@@ -48,7 +48,11 @@ namespace DnsToolkit.Net.Dns
 		/// </summary>
 		/// <param name="resolverHintStore"> The resolver hint store with the IP addresses of the root server hints</param>
 		public RecursiveDnsResolver(IResolverHintStore? resolverHintStore = null)
+			: this(resolverHintStore, new IClientTransport[] { new TcpClientTransport(), new UdpClientTransport() }) { }
+
+		internal RecursiveDnsResolver(IResolverHintStore? resolverHintStore, IClientTransport[] transports)
 		{
+			_transports = transports;
 			_resolverHintStore = resolverHintStore ?? new StaticResolverHintStore();
 			IsResponseValidationEnabled = true;
 			QueryTimeout = 2000;
@@ -119,11 +123,16 @@ namespace DnsToolkit.Net.Dns
 			return ResolveAsyncInternal<T>(name, recordType, recordClass, new ResolveContext(), token);
 		}
 
-		private async Task<DnsMessage> ResolveMessageAsync(DomainName name, RecordType recordType, RecordClass recordClass, ResolveContext state, CancellationToken token)
+		/// <summary>
+		///   Follows the referrals to the authoritative answer and returns it with the zone of the server, which answered
+		/// </summary>
+		private async Task<(DnsMessage Message, DomainName Zone)> ResolveMessageAsync(DomainName name, RecordType recordType, RecordClass recordClass, ResolveContext state, CancellationToken token)
 		{
 			for (; state.QueryCount <= MaximumReferalCount; state.QueryCount++)
 			{
-				DnsMessage? msg = await new DnsClient(GetBestNameservers(recordType == RecordType.Ds ? name.GetParentName() : name), _transports, false, QueryTimeout)
+				var (zone, nameservers) = GetBestNameservers(recordType == RecordType.Ds ? name.GetParentName() : name);
+
+				DnsMessage? msg = await new DnsClient(nameservers, _transports, false, QueryTimeout)
 				{
 					IsResponseValidationEnabled = IsResponseValidationEnabled,
 					Is0x20ValidationEnabled = Is0x20ValidationEnabled
@@ -136,12 +145,15 @@ namespace DnsToolkit.Net.Dns
 				if ((msg != null) && ((msg.ReturnCode == ReturnCode.NoError) || (msg.ReturnCode == ReturnCode.NxDomain)))
 				{
 					if (msg.IsAuthoritiveAnswer)
-						return msg;
+						return (msg, zone);
 
+					// A server may only refer to a zone below its own zone. Otherwise, the server of any zone could take over
+					// the resolution of other zones, e.g. with a referral to the name servers of its own for a top level domain.
 					List<NsRecord> referalRecords = msg.AuthorityRecords
 						.Where(x =>
 							(x.RecordType == RecordType.Ns)
-							&& (name.Equals(x.Name) || name.IsSubDomainOf(x.Name)))
+							&& (name.Equals(x.Name) || name.IsSubDomainOf(x.Name))
+							&& x.Name.IsSubDomainOf(zone))
 						.OfType<NsRecord>()
 						.ToList();
 
@@ -153,11 +165,11 @@ namespace DnsToolkit.Net.Dns
 
 							if (newServers.Count > 0)
 							{
-								DomainName zone = referalRecords.First().Name;
+								DomainName referredZone = referalRecords.First().Name;
 
 								foreach (var newServer in newServers)
 								{
-									_nameserverCache.Add(zone, newServer.Address, newServer.TimeToLive);
+									_nameserverCache.Add(referredZone, newServer.Address, newServer.TimeToLive);
 								}
 
 								continue;
@@ -204,7 +216,7 @@ namespace DnsToolkit.Net.Dns
 					return await ResolveAsyncInternal<T>(canonicalName, recordType, recordClass, context, token).ConfigureAwait(false);
 				}
 
-				DnsMessage msg = await ResolveMessageAsync(name, recordType, recordClass, context, token).ConfigureAwait(false);
+				var (msg, zone) = await ResolveMessageAsync(name, recordType, recordClass, context, token).ConfigureAwait(false);
 
 				// check for cname
 				List<DnsRecordBase> cNameRecords = msg.AnswerRecords.Where(x => (x.RecordType == RecordType.CName) && (x.RecordClass == recordClass) && x.Name.Equals(name)).ToList();
@@ -214,7 +226,11 @@ namespace DnsToolkit.Net.Dns
 
 					DomainName canonicalName = ((CNameRecord) cNameRecords.First()).CanonicalName;
 
-					List<DnsRecordBase> matchingAdditionalRecords = msg.AnswerRecords.Where(x => (x.RecordType == recordType) && (x.RecordClass == recordClass) && x.Name.Equals(canonicalName)).ToList();
+					// Only the records inside of the zone of the server are trusted, the ones of other zones are resolved separately.
+					// Otherwise, the server of any zone could answer with an alias to a name of another zone and its records.
+					List<DnsRecordBase> matchingAdditionalRecords = canonicalName.IsEqualOrSubDomainOf(zone)
+						? msg.AnswerRecords.Where(x => (x.RecordType == recordType) && (x.RecordClass == recordClass) && x.Name.Equals(canonicalName)).ToList()
+						: new List<DnsRecordBase>();
 					if (matchingAdditionalRecords.Count > 0)
 					{
 						_cache.Add(canonicalName, recordType, recordClass, matchingAdditionalRecords, DnsSecValidationResult.Indeterminate, matchingAdditionalRecords.Min(x => x.TimeToLive));
@@ -264,7 +280,7 @@ namespace DnsToolkit.Net.Dns
 			return result;
 		}
 
-		private IEnumerable<IPAddress> GetBestNameservers(DomainName name)
+		private (DomainName Zone, IEnumerable<IPAddress> Addresses) GetBestNameservers(DomainName name)
 		{
 			var rnd = new Random();
 
@@ -272,13 +288,13 @@ namespace DnsToolkit.Net.Dns
 			{
 				if (_nameserverCache.TryGetAddresses(name, out var cachedAddresses))
 				{
-					return cachedAddresses!.OrderBy(x => x.AddressFamily == AddressFamily.InterNetworkV6 ? 0 : 1).ThenBy(x => rnd.Next());
+					return (name, cachedAddresses!.OrderBy(x => x.AddressFamily == AddressFamily.InterNetworkV6 ? 0 : 1).ThenBy(x => rnd.Next()));
 				}
 
 				name = name.GetParentName();
 			}
 
-			return _resolverHintStore.RootServers.OrderBy(x => x.AddressFamily == AddressFamily.InterNetworkV6 ? 0 : 1).ThenBy(x => rnd.Next());
+			return (DomainName.Root, _resolverHintStore.RootServers.OrderBy(x => x.AddressFamily == AddressFamily.InterNetworkV6 ? 0 : 1).ThenBy(x => rnd.Next()));
 		}
 
 		void IDisposable.Dispose()

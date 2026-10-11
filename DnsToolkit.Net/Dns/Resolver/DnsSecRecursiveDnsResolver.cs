@@ -40,7 +40,7 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 	private DnsCache _cache = new();
 	private readonly DnsSecValidator<ResolveContext> _validator;
 	private NameserverCache _nameserverCache = new();
-	private readonly IClientTransport[] _transports = { new TcpClientTransport(), new UdpClientTransport() };
+	private readonly IClientTransport[] _transports;
 
 	private readonly IResolverHintStore _resolverHintStore;
 
@@ -49,7 +49,11 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 	/// </summary>
 	/// <param name="resolverHintStore"> The resolver hint store with the IP addresses of the root server and root DnsKey hints</param>
 	public DnsSecRecursiveDnsResolver(IResolverHintStore? resolverHintStore = null)
+		: this(resolverHintStore, new IClientTransport[] { new TcpClientTransport(), new UdpClientTransport() }) { }
+
+	internal DnsSecRecursiveDnsResolver(IResolverHintStore? resolverHintStore, IClientTransport[] transports)
 	{
+		_transports = transports;
 		_resolverHintStore = resolverHintStore ?? new StaticResolverHintStore();
 		_validator = new DnsSecValidator<ResolveContext>(this, _resolverHintStore);
 		IsResponseValidationEnabled = true;
@@ -152,11 +156,16 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 		return ResolveAsyncInternal<T>(name, recordType, recordClass, new ResolveContext(), token);
 	}
 
-	private async Task<DnsMessage?> ResolveMessageAsync(DomainName name, RecordType recordType, RecordClass recordClass, ResolveContext resolveContext, CancellationToken token)
+	/// <summary>
+	///   Follows the referrals to the authoritative answer and returns it with the zone of the server, which answered
+	/// </summary>
+	private async Task<(DnsMessage Message, DomainName Zone)> ResolveMessageAsync(DomainName name, RecordType recordType, RecordClass recordClass, ResolveContext resolveContext, CancellationToken token)
 	{
 		for (; resolveContext.QueryCount <= MaximumReferralCount; resolveContext.QueryCount++)
 		{
-			DnsMessage? msg = await new DnsClient(GetBestNameservers(recordType == RecordType.Ds ? name.GetParentName() : name), _transports, true, QueryTimeout)
+			var (zone, nameservers) = GetBestNameservers(recordType == RecordType.Ds ? name.GetParentName() : name);
+
+			DnsMessage? msg = await new DnsClient(nameservers, _transports, true, QueryTimeout)
 			{
 				IsResponseValidationEnabled = IsResponseValidationEnabled,
 				Is0x20ValidationEnabled = Is0x20ValidationEnabled
@@ -170,12 +179,15 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 			if ((msg != null) && ((msg.ReturnCode == ReturnCode.NoError) || (msg.ReturnCode == ReturnCode.NxDomain)))
 			{
 				if (msg.IsAuthoritiveAnswer)
-					return msg;
+					return (msg, zone);
 
+				// A server may only refer to a zone below its own zone. Otherwise, the server of any zone could take over
+				// the resolution of other zones, e.g. with a referral to the name servers of its own for a top level domain.
 				List<NsRecord> referralRecords = msg.AuthorityRecords
 					.Where(x =>
 						(x.RecordType == RecordType.Ns)
-						&& (name.Equals(x.Name) || name.IsSubDomainOf(x.Name)))
+						&& (name.Equals(x.Name) || name.IsSubDomainOf(x.Name))
+						&& x.Name.IsSubDomainOf(zone))
 					.OfType<NsRecord>()
 					.ToList();
 
@@ -187,11 +199,11 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 
 						if (newServers.Count > 0)
 						{
-							var zone = referralRecords.First().Name;
+							var referredZone = referralRecords.First().Name;
 
 							foreach (var newServer in newServers)
 							{
-								_nameserverCache.Add(zone, newServer.Address, newServer.TimeToLive);
+								_nameserverCache.Add(referredZone, newServer.Address, newServer.TimeToLive);
 							}
 
 							continue;
@@ -239,7 +251,7 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 				return new DnsSecResult<T>(cNameResult.Records, cachedCNames!.ValidationResult == cNameResult.ValidationResult ? cachedCNames.ValidationResult : DnsSecValidationResult.Unsigned);
 			}
 
-			var msg = await ResolveMessageAsync(name, recordType, recordClass, resolveContext, token).ConfigureAwait(false);
+			var (msg, zone) = await ResolveMessageAsync(name, recordType, recordClass, resolveContext, token).ConfigureAwait(false);
 
 			// check for cname
 			var cNameRecords = msg?.AnswerRecords.Where(x => (x.RecordType == RecordType.CName) && (x.RecordClass == recordClass) && x.Name.Equals(name)).ToList();
@@ -253,7 +265,11 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 
 				var canonicalName = ((CNameRecord) cNameRecords.First()).CanonicalName;
 
-				var matchingAdditionalRecords = msg?.AnswerRecords.Where(x => (x.RecordType == recordType) && (x.RecordClass == recordClass) && x.Name.Equals(canonicalName)).ToList();
+				// Only the records inside of the zone of the server are trusted, the ones of other zones are resolved separately.
+				// Otherwise, the server of any zone could answer with an alias to a name of another zone and its records.
+				var matchingAdditionalRecords = canonicalName.IsEqualOrSubDomainOf(zone)
+					? msg?.AnswerRecords.Where(x => (x.RecordType == recordType) && (x.RecordClass == recordClass) && x.Name.Equals(canonicalName)).ToList()
+					: null;
 				if (matchingAdditionalRecords?.Count > 0)
 				{
 					var matchingValidationResult = await _validator.ValidateAsync(canonicalName, recordType, recordClass, msg!, matchingAdditionalRecords, resolveContext, token).ConfigureAwait(false);
@@ -319,7 +335,7 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 		return result;
 	}
 
-	private IEnumerable<IPAddress> GetBestNameservers(DomainName name)
+	private (DomainName Zone, IEnumerable<IPAddress> Addresses) GetBestNameservers(DomainName name)
 	{
 		var rnd = new Random();
 
@@ -327,18 +343,18 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 		{
 			if (_nameserverCache.TryGetAddresses(name, out var cachedAddresses))
 			{
-				return cachedAddresses!.OrderBy(x => x.AddressFamily == AddressFamily.InterNetworkV6 ? 0 : 1).ThenBy(_ => rnd.Next());
+				return (name, cachedAddresses!.OrderBy(x => x.AddressFamily == AddressFamily.InterNetworkV6 ? 0 : 1).ThenBy(_ => rnd.Next()));
 			}
 
 			name = name.GetParentName();
 		}
 
-		return _resolverHintStore.RootServers.OrderBy(x => x.AddressFamily == AddressFamily.InterNetworkV6 ? 0 : 1).ThenBy(_ => rnd.Next());
+		return (DomainName.Root, _resolverHintStore.RootServers.OrderBy(x => x.AddressFamily == AddressFamily.InterNetworkV6 ? 0 : 1).ThenBy(_ => rnd.Next()));
 	}
 
-	Task<DnsMessage?> IInternalDnsSecResolver<ResolveContext>.ResolveMessageAsync(DomainName name, RecordType recordType, RecordClass recordClass, ResolveContext resolveContext, CancellationToken token)
+	async Task<DnsMessage?> IInternalDnsSecResolver<ResolveContext>.ResolveMessageAsync(DomainName name, RecordType recordType, RecordClass recordClass, ResolveContext resolveContext, CancellationToken token)
 	{
-		return ResolveMessageAsync(name, recordType, recordClass, resolveContext, token);
+		return (await ResolveMessageAsync(name, recordType, recordClass, resolveContext, token).ConfigureAwait(false)).Message;
 	}
 
 	Task<DnsSecResult<TRecord>> IInternalDnsSecResolver<ResolveContext>.ResolveSecureAsync<TRecord>(DomainName name, RecordType recordType, RecordClass recordClass, ResolveContext resolveContext, CancellationToken token)
