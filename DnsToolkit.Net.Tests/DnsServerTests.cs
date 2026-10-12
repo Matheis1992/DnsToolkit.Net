@@ -42,6 +42,22 @@ public class DnsServerTests
 	}
 
 	[Fact]
+	public async Task QueryForNxName_IsAnsweredWithFormErr_WithoutTheHandler()
+	{
+		// the handler of the local server would answer the name with NXDOMAIN
+		using var server = new LocalDnsServer(Array.Empty<DnsRecordBase>());
+		using var client = server.CreateClient(new UdpClientTransport(server.Port));
+
+		var response = await client.ResolveAsync(DomainName.Parse("host.example.test"), RecordType.NxName, RecordClass.INet, DnsQueryOptions.DefaultQueryOptions, TestToken);
+
+		// RFC 9824, section 3.4
+		Assert.NotNull(response);
+		Assert.Equal(ReturnCode.FormatError, response.ReturnCode);
+		var error = Assert.IsType<ExtendedDnsErrorOption>(Assert.Single(response.EDnsOptions!.Options));
+		Assert.Equal(ExtendedDnsErrorCode.InvalidQueryType, error.InfoCode);
+	}
+
+	[Fact]
 	public async Task Connection_IsDisposed_WhenRefused()
 	{
 		var connection = new FakeServerConnection(CreateQueryPackage());

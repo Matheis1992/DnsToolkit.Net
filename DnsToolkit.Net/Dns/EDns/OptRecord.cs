@@ -89,7 +89,34 @@ namespace DnsToolkit.Net.Dns
 				}
 				else
 				{
-					TimeToLive &= 0x7fff;
+					// only the flag, the TTL field also holds the other flags, the version and the extended response code
+					TimeToLive &= ~0x8000;
+				}
+			}
+		}
+
+		/// <summary>
+		///   <para>
+		///     Gets or sets the Compact Answers OK (CO) flag. In a query, it allows the answer to a nonexistent name with
+		///     Compact Denial of Existence to have the response code NXDOMAIN instead of NOERROR.
+		///   </para>
+		///   <para>
+		///     Defined in
+		///     <a href="https://www.rfc-editor.org/rfc/rfc9824.html">RFC 9824</a>.
+		///   </para>
+		/// </summary>
+		public bool IsCompactAnswersOk
+		{
+			get { return (TimeToLive & 0x4000) != 0; }
+			set
+			{
+				if (value)
+				{
+					TimeToLive |= 0x4000;
+				}
+				else
+				{
+					TimeToLive &= ~0x4000;
 				}
 			}
 		}
@@ -173,6 +200,11 @@ namespace DnsToolkit.Net.Dns
 						option = new PaddingOption(resultData, currentPosition, dataLength);
 						break;
 
+					// the info code is mandatory, a shorter option is kept as it was received
+					case EDnsOptionType.ExtendedDnsError when dataLength >= 2:
+						option = new ExtendedDnsErrorOption(resultData, currentPosition, dataLength);
+						break;
+
 					default:
 						option = new UnknownOption(type, resultData, currentPosition, dataLength);
 						break;
@@ -200,7 +232,7 @@ namespace DnsToolkit.Net.Dns
 
 		internal override string RecordDataToString()
 		{
-			string flags = IsDnsSecOk ? "DO" : "";
+			string flags = String.Join(" ", new[] { IsDnsSecOk ? "DO" : null, IsCompactAnswersOk ? "CO" : null }.Where(x => x != null));
 			return String.Format("; EDNS version: {0}; flags: {1}; udp: {2}", Version, flags, UdpPayloadSize);
 		}
 

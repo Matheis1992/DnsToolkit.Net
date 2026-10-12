@@ -244,6 +244,75 @@ public class TcpTransportTests
 		Assert.Equal(0x4242, (await response).TransactionID);
 	}
 
+	[Fact]
+	public async Task IsConnected_DoesNotWaitForData_WhileTheReceiveLoopReadsTheConnection()
+	{
+		// The pool checks a connection before every query, while the receive loop of the connection reads the responses. A
+		// check, which waited for data, which the receive loop had taken, blocked the thread up to the receive timeout.
+		var listener = new TcpListener(IPAddress.Loopback, 0);
+		listener.Start();
+		using var client = new TcpClient { ReceiveTimeout = 5000 };
+		await client.ConnectAsync(IPAddress.Loopback, ((IPEndPoint) listener.LocalEndpoint).Port, TestToken);
+		using var server = await listener.AcceptTcpClientAsync(TestToken);
+		listener.Stop();
+		var clientStream = client.GetStream();
+		var serverStream = server.GetStream();
+
+		using var cts = new CancellationTokenSource();
+		var receiveLoop = Task.Run(async () =>
+		{
+			var buffer = new byte[1];
+			while (await clientStream.ReadAsync(buffer, 0, buffer.Length, cts.Token) > 0) { }
+		}, TestToken);
+
+		try
+		{
+			var stopwatch = new Stopwatch();
+			for (var i = 0; i < 500; i++)
+			{
+				// two bytes, so the second one waits in the socket, until the receive loop reads again
+				await serverStream.WriteAsync(new byte[] { 1, 2 }, 0, 2, TestToken);
+
+				stopwatch.Restart();
+				var isConnected = client.IsConnected();
+				stopwatch.Stop();
+
+				Assert.True(isConnected, $"The connection was reported as closed in check {i}");
+				Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(1), $"Check {i} took {stopwatch.Elapsed}");
+			}
+		}
+		finally
+		{
+			cts.Cancel();
+			client.Close();
+			try
+			{
+				await receiveLoop;
+			}
+			catch (Exception ex) when (ex is OperationCanceledException or IOException or ObjectDisposedException)
+			{
+				// the loop ends with the connection
+			}
+		}
+	}
+
+	[Fact]
+	public async Task IsConnected_DetectsAConnectionClosedByTheRemoteSide()
+	{
+		var listener = new TcpListener(IPAddress.Loopback, 0);
+		listener.Start();
+		using var client = new TcpClient();
+		await client.ConnectAsync(IPAddress.Loopback, ((IPEndPoint) listener.LocalEndpoint).Port, TestToken);
+		var server = await listener.AcceptTcpClientAsync(TestToken);
+		listener.Stop();
+
+		Assert.True(client.IsConnected());
+
+		server.Close();
+
+		Assert.True(SpinWait.SpinUntil(() => !client.IsConnected(), TimeSpan.FromSeconds(5)), "The closed connection was reported as connected");
+	}
+
 	private static LocalDnsServer CreateServer(int tcpTimeout = 5000, int tcpKeepAlive = 120000, int maxConcurrentConnections = 1000)
 	{
 		return new LocalDnsServer(new DnsRecordBase[] { new ARecord(_name, 60, _address) }, tcpTimeout: tcpTimeout, tcpKeepAlive: tcpKeepAlive, maxConcurrentConnectionsPerTransport: maxConcurrentConnections);

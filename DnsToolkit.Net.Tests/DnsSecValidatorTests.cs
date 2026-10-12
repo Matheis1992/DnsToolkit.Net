@@ -299,6 +299,54 @@ public class DnsSecValidatorTests
 		Assert.Equal(DnsSecValidationResult.Signed, await ValidateAsync(_childHost, message, new List<ARecord>()));
 	}
 
+	[Theory]
+	[InlineData(ReturnCode.NoError)]
+	// with the Compact Answers OK flag in the query, the authoritative server answers with NXDOMAIN
+	[InlineData(ReturnCode.NxDomain)]
+	public async Task CompactDenialOfExistence_DeniesTheName(ReturnCode returnCode)
+	{
+		// RFC 9824: the NSEC record of the nonexistent name itself, its next name is the immediate successor
+		var message = new DnsMessage { ReturnCode = returnCode };
+		var nsec = new NSecRecord(_childHost, RecordClass.INet, 3600, DomainName.Parse(@"\000." + _childHost), new List<RecordType> { RecordType.RrSig, RecordType.NSec, RecordType.NxName });
+		AddSigned(message, nsec);
+
+		Assert.True(nsec.IsCompactDenialOfExistence);
+		Assert.Equal(DnsSecValidationResult.Signed, await ValidateAsync(_childHost, message, new List<ARecord>()));
+	}
+
+	[Fact]
+	public async Task CompactDenialOfExistence_OfAnEmptyNonTerminal_IsNoData()
+	{
+		// RFC 9824: the NSEC record of an empty non-terminal has no NXNAME
+		var message = new DnsMessage();
+		var nsec = new NSecRecord(_childHost, RecordClass.INet, 3600, DomainName.Parse(@"\000." + _childHost), new List<RecordType> { RecordType.RrSig, RecordType.NSec });
+		AddSigned(message, nsec);
+
+		Assert.False(nsec.IsCompactDenialOfExistence);
+		Assert.Equal(DnsSecValidationResult.Signed, await ValidateAsync(_childHost, message, new List<ARecord>()));
+	}
+
+	[Fact]
+	public async Task NxDomainOfAnIntermediateName_DeniesTheNamesBelowIt()
+	{
+		// With QNAME minimisation, the NXDOMAIN for child.example.test answers the query for host.child.example.test (RFC 8020),
+		// so its proof is validated for the full name: the NSEC covering child.example.test and the one denying *.example.test.
+		var message = new DnsMessage { ReturnCode = ReturnCode.NxDomain };
+		AddSigned(message, new NSecRecord(DomainName.Parse("b.example.test"), RecordClass.INet, 3600, DomainName.Parse("d.example.test"), new List<RecordType> { RecordType.A, RecordType.RrSig, RecordType.NSec }));
+		AddSigned(message, new NSecRecord(_zone, RecordClass.INet, 3600, DomainName.Parse("a.example.test"), new List<RecordType> { RecordType.Soa, RecordType.Ns, RecordType.DnsKey, RecordType.RrSig, RecordType.NSec }));
+
+		Assert.Equal(DnsSecValidationResult.Signed, await ValidateAsync(_child, message, new List<ARecord>()));
+		Assert.Equal(DnsSecValidationResult.Signed, await ValidateAsync(_childHost, message, new List<ARecord>()));
+	}
+
+	[Fact]
+	public void NxName_IsPresentedByItsName()
+	{
+		Assert.Equal("NXNAME", RecordType.NxName.ToShortString());
+		Assert.Equal(RecordType.NxName, RecordTypeHelper.ParseShortString("NXNAME"));
+		Assert.Equal((RecordType) 128, RecordType.NxName);
+	}
+
 	[Fact]
 	public async Task NSecOfADelegationPoint_DoesNotDenyOtherRecordsThanDs()
 	{

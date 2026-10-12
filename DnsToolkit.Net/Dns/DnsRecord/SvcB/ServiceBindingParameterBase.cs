@@ -70,6 +70,15 @@ public abstract class ServiceBindingParameterBase
 			case ServiceBindingParameterKey.IPv6Hint:
 				return new IPv6HintBindingParameter(resultData, ref currentPosition, valueLength);
 
+			case ServiceBindingParameterKey.ECH:
+				return new EchServiceBindingParameter(resultData, ref currentPosition, valueLength);
+
+			case ServiceBindingParameterKey.DohPath:
+				return new DohPathServiceBindingParameter(resultData, ref currentPosition, valueLength);
+
+			case ServiceBindingParameterKey.ObliviousHttp:
+				return new ObliviousHttpServiceBindingParameter(resultData, ref currentPosition, valueLength);
+
 			default:
 				return new UnknownServiceBindingParameter(type, resultData, ref currentPosition, valueLength);
 		}
@@ -96,6 +105,15 @@ public abstract class ServiceBindingParameterBase
 
 			case ServiceBindingParameterKey.IPv6Hint:
 				return new IPv6HintBindingParameter(type, parameter);
+
+			case ServiceBindingParameterKey.ECH:
+				return new EchServiceBindingParameter(type, parameter);
+
+			case ServiceBindingParameterKey.DohPath:
+				return new DohPathServiceBindingParameter(type, parameter);
+
+			case ServiceBindingParameterKey.ObliviousHttp:
+				return new ObliviousHttpServiceBindingParameter(type, parameter);
 
 			default:
 				return new UnknownServiceBindingParameter(type, parameter);

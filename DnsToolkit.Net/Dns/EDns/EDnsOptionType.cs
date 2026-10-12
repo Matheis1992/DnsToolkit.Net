@@ -136,5 +136,14 @@ namespace DnsToolkit.Net.Dns
 		///   </para>
 		/// </summary>
 		Padding = 12,
+
+		/// <summary>
+		///   <para>Extended DNS Error</para>
+		///   <para>
+		///     Defined in
+		///     <a href="https://www.rfc-editor.org/rfc/rfc8914.html">RFC 8914</a>.
+		///   </para>
+		/// </summary>
+		ExtendedDnsError = 15,
 	}
 }

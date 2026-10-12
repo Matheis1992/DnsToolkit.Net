@@ -23,7 +23,7 @@ namespace DnsToolkit.Net.Dns;
 ///   <para>Port service binding parameter</para>
 ///   <para>
 ///     Defined in
-///     <a href="https://datatracker.ietf.org/doc/draft-ietf-dnsop-svcb-https/12/">draft-ietf-dnsop-svcb-https</a>.
+///     <a href="https://www.rfc-editor.org/rfc/rfc9460.html">RFC 9460</a>.
 ///   </para>
 /// </summary>
 public class PortServiceBindingParameter : ServiceBindingParameterBase
