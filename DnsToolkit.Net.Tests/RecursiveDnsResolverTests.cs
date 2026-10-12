@@ -132,6 +132,127 @@ public class RecursiveDnsResolverTests
 		Assert.Equal(new[] { _bankAddress }, (await resolver.ResolveAsync<ARecord>(_bankHost, token: TestToken)).Select(x => x.Address));
 	}
 
+	private static readonly DomainName _deepHost = DomainName.Parse("a.b.example.test");
+
+	[Fact]
+	public async Task QNameMinimisation_SendsEveryServerOnlyOneLabelBelowItsZone()
+	{
+		using var server = new ScriptedServer((question, response, _) => AnswerExampleZone(question, response, ReturnCode.NoError));
+		using var resolver = CreateResolver(server);
+
+		Assert.Equal(new[] { IPAddress.Parse("192.0.2.10") }, (await resolver.ResolveAsync<ARecord>(_deepHost, token: TestToken)).Select(x => x.Address));
+
+		// the root only gets test, the server of test only example.test, b.example.test exists without a zone cut
+		Assert.Equal(new[] { "test. A", "example.test. A", "b.example.test. A", "a.b.example.test. A" }, server.Questions);
+	}
+
+	[Fact]
+	public async Task QNameMinimisation_Disabled_SendsTheFullName()
+	{
+		using var server = new ScriptedServer((question, response, _) => AnswerExampleZone(question, response, ReturnCode.NoError));
+		using var resolver = CreateResolver(server);
+		resolver.IsQNameMinimisationEnabled = false;
+
+		Assert.Single(await resolver.ResolveAsync<ARecord>(_deepHost, token: TestToken));
+
+		Assert.Equal(new[] { "a.b.example.test. A" }, server.Questions);
+	}
+
+	[Fact]
+	public async Task QNameMinimisation_AfterNxDomainForAnEmptyNonTerminal_SendsTheFullName()
+	{
+		// some servers answer an empty non-terminal wrongly with NXDOMAIN
+		using var server = new ScriptedServer((question, response, _) => AnswerExampleZone(question, response, ReturnCode.NxDomain));
+		using var resolver = CreateResolver(server);
+
+		Assert.Equal(new[] { IPAddress.Parse("192.0.2.10") }, (await resolver.ResolveAsync<ARecord>(_deepHost, token: TestToken)).Select(x => x.Address));
+		Assert.Equal(new[] { "test. A", "example.test. A", "b.example.test. A", "a.b.example.test. A" }, server.Questions);
+	}
+
+	[Fact]
+	public async Task QNameMinimisation_AfterACNameForAnIntermediateName_SendsTheFullName()
+	{
+		using var server = new ScriptedServer((question, response, _) =>
+		{
+			if (question.Name.Equals(DomainName.Parse("b.example.test")))
+			{
+				response.IsAuthoritiveAnswer = true;
+				response.AnswerRecords.Add(new CNameRecord(question.Name, 3600, DomainName.Parse("elsewhere.example.test")));
+			}
+			else
+			{
+				AnswerExampleZone(question, response, ReturnCode.NoError);
+			}
+		});
+		using var resolver = CreateResolver(server);
+
+		Assert.Single(await resolver.ResolveAsync<ARecord>(_deepHost, token: TestToken));
+		Assert.Equal(new[] { "test. A", "example.test. A", "b.example.test. A", "a.b.example.test. A" }, server.Questions);
+	}
+
+	[Fact]
+	public async Task QNameMinimisation_OfANameWithManyLabels_IsLimited()
+	{
+		var name = DomainName.Parse("l1.l2.l3.l4.l5.l6.l7.l8.l9.l10.l11.l12.l13.test");
+		using var server = new ScriptedServer((question, response, _) =>
+		{
+			if (question.Name.Equals(DomainName.Parse("test")))
+			{
+				Refer(response, DomainName.Parse("test"));
+				return;
+			}
+
+			response.IsAuthoritiveAnswer = true;
+			if (question.Name.Equals(name))
+				response.AnswerRecords.Add(new ARecord(name, 3600, IPAddress.Parse("192.0.2.11")));
+			else
+				response.AuthorityRecords.Add(new SoaRecord(DomainName.Parse("test"), 3600, DomainName.Parse("ns.test"), DomainName.Parse("hostmaster.test"), 1, 3600, 600, 86400, 300));
+		});
+		using var resolver = CreateResolver(server);
+
+		Assert.Single(await resolver.ResolveAsync<ARecord>(name, token: TestToken));
+
+		// not one query per label: after 10 minimised queries, the full name is sent
+		Assert.Equal(QNameMinimiser.MAX_MINIMISED_QUERIES + 1, server.Questions.Count);
+		Assert.Equal("l1.l2.l3.l4.l5.l6.l7.l8.l9.l10.l11.l12.l13.test. A", server.Questions.Last());
+	}
+
+	/// <summary>
+	///   The zones test and example.test, in which b.example.test exists without records of the type A
+	/// </summary>
+	private static void AnswerExampleZone(DnsQuestion question, DnsMessage response, ReturnCode returnCodeOfIntermediateName)
+	{
+		if (question.Name.Equals(DomainName.Parse("test")))
+		{
+			Refer(response, DomainName.Parse("test"));
+		}
+		else if (question.Name.Equals(DomainName.Parse("example.test")))
+		{
+			Refer(response, DomainName.Parse("example.test"));
+		}
+		else if (question.Name.Equals(DomainName.Parse("b.example.test")))
+		{
+			response.IsAuthoritiveAnswer = true;
+			response.ReturnCode = returnCodeOfIntermediateName;
+			response.AuthorityRecords.Add(new SoaRecord(DomainName.Parse("example.test"), 3600, DomainName.Parse("ns.example.test"), DomainName.Parse("hostmaster.example.test"), 1, 3600, 600, 86400, 300));
+		}
+		else
+		{
+			response.IsAuthoritiveAnswer = true;
+			response.AnswerRecords.Add(new ARecord(question.Name, 3600, IPAddress.Parse("192.0.2.10")));
+		}
+	}
+
+	/// <summary>
+	///   A referral to the zone, whose name server is the same local server
+	/// </summary>
+	private static void Refer(DnsMessage response, DomainName zone)
+	{
+		var nameServer = DomainName.Parse("ns." + zone);
+		response.AuthorityRecords.Add(new NsRecord(zone, 3600, nameServer));
+		response.AdditionalRecords.Add(new ARecord(nameServer, 3600, IPAddress.Loopback));
+	}
+
 	private static RecursiveDnsResolver CreateResolver(ScriptedServer server)
 	{
 		return new RecursiveDnsResolver(new LoopbackHintStore(), new IClientTransport[] { new UdpClientTransport(server.Port) })
@@ -176,8 +297,21 @@ public class RecursiveDnsResolverTests
 		private readonly DnsServer _server;
 		private readonly Action<DnsQuestion, DnsMessage, int> _answer;
 		private readonly Dictionary<DomainName, int> _queryCounts = new();
+		private readonly List<string> _questions = new();
 
 		public int Port { get; }
+
+		/// <summary>
+		///   The name and type of every query so far, in the order of their arrival
+		/// </summary>
+		public List<string> Questions
+		{
+			get
+			{
+				lock (_queryCounts)
+					return _questions.ToList();
+			}
+		}
 
 		public ScriptedServer(Action<DnsQuestion, DnsMessage, int> answer)
 		{
@@ -213,6 +347,7 @@ public class RecursiveDnsResolverTests
 			{
 				_queryCounts.TryGetValue(question.Name, out queryCount);
 				_queryCounts[question.Name] = ++queryCount;
+				_questions.Add(question.Name + " " + question.RecordType.ToShortString());
 			}
 
 			_answer(question, response, queryCount);

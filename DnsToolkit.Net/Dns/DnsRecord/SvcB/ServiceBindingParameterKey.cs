@@ -28,7 +28,7 @@ public enum ServiceBindingParameterKey : ushort
 	///   <para>Mandatory keys</para>
 	///   <para>
 	///     Defined in
-	///     <a href="https://datatracker.ietf.org/doc/draft-ietf-dnsop-svcb-https/12/">draft-ietf-dnsop-svcb-https</a>.
+	///     <a href="https://www.rfc-editor.org/rfc/rfc9460.html">RFC 9460</a>.
 	///   </para>
 	/// </summary>
 	Mandatory = 0,
@@ -37,7 +37,7 @@ public enum ServiceBindingParameterKey : ushort
 	///   <para>Additional supported protocols</para>
 	///   <para>
 	///     Defined in
-	///     <a href="https://datatracker.ietf.org/doc/draft-ietf-dnsop-svcb-https/12/">draft-ietf-dnsop-svcb-https</a>.
+	///     <a href="https://www.rfc-editor.org/rfc/rfc9460.html">RFC 9460</a>.
 	///   </para>
 	/// </summary>
 	// ReSharper disable once InconsistentNaming
@@ -48,7 +48,7 @@ public enum ServiceBindingParameterKey : ushort
 	///   <para>No support for default protocol</para>
 	///   <para>
 	///     Defined in
-	///     <a href="https://datatracker.ietf.org/doc/draft-ietf-dnsop-svcb-https/12/">draft-ietf-dnsop-svcb-https</a>.
+	///     <a href="https://www.rfc-editor.org/rfc/rfc9460.html">RFC 9460</a>.
 	///   </para>
 	/// </summary>
 	// ReSharper disable once InconsistentNaming
@@ -59,7 +59,7 @@ public enum ServiceBindingParameterKey : ushort
 	///   <para>Port for alternative endpoint</para>
 	///   <para>
 	///     Defined in
-	///     <a href="https://datatracker.ietf.org/doc/draft-ietf-dnsop-svcb-https/12/">draft-ietf-dnsop-svcb-https</a>.
+	///     <a href="https://www.rfc-editor.org/rfc/rfc9460.html">RFC 9460</a>.
 	///   </para>
 	/// </summary>
 	Port = 3,
@@ -68,20 +68,19 @@ public enum ServiceBindingParameterKey : ushort
 	///   <para>IPv4 address hints</para>
 	///   <para>
 	///     Defined in
-	///     <a href="https://datatracker.ietf.org/doc/draft-ietf-dnsop-svcb-https/12/">draft-ietf-dnsop-svcb-https</a>.
+	///     <a href="https://www.rfc-editor.org/rfc/rfc9460.html">RFC 9460</a>.
 	///   </para>
 	/// </summary>
 	// ReSharper disable once InconsistentNaming
 	IPv4Hint = 4,
 
 	/// <summary>
-	///   <para>RESERVED (will be used for ECH)</para>
+	///   <para>Encrypted ClientHello configuration</para>
 	///   <para>
 	///     Defined in
-	///     <a href="https://datatracker.ietf.org/doc/draft-ietf-dnsop-svcb-https/12/">draft-ietf-dnsop-svcb-https</a>.
+	///     <a href="https://www.rfc-editor.org/rfc/rfc9460.html">RFC 9460</a>.
 	///   </para>
 	/// </summary>
-	// ReSharper disable once UnusedMember.Global
 	// ReSharper disable once InconsistentNaming
 	ECH = 5,
 
@@ -89,9 +88,27 @@ public enum ServiceBindingParameterKey : ushort
 	///   <para>IPv6 address hints</para>
 	///   <para>
 	///     Defined in
-	///     <a href="https://datatracker.ietf.org/doc/draft-ietf-dnsop-svcb-https/12/">draft-ietf-dnsop-svcb-https</a>.
+	///     <a href="https://www.rfc-editor.org/rfc/rfc9460.html">RFC 9460</a>.
 	///   </para>
 	/// </summary>
 	// ReSharper disable once InconsistentNaming
-	IPv6Hint = 6
+	IPv6Hint = 6,
+
+	/// <summary>
+	///   <para>URI template of a DNS over HTTPS endpoint</para>
+	///   <para>
+	///     Defined in
+	///     <a href="https://www.rfc-editor.org/rfc/rfc9461.html">RFC 9461</a>.
+	///   </para>
+	/// </summary>
+	DohPath = 7,
+
+	/// <summary>
+	///   <para>Oblivious HTTP gateway</para>
+	///   <para>
+	///     Defined in
+	///     <a href="https://www.rfc-editor.org/rfc/rfc9540.html">RFC 9540</a>.
+	///   </para>
+	/// </summary>
+	ObliviousHttp = 8
 }

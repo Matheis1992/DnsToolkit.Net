@@ -55,6 +55,7 @@ namespace DnsToolkit.Net.Dns
 			_transports = transports;
 			_resolverHintStore = resolverHintStore ?? new StaticResolverHintStore();
 			IsResponseValidationEnabled = true;
+			IsQNameMinimisationEnabled = true;
 			QueryTimeout = 2000;
 			MaximumReferalCount = 20;
 		}
@@ -81,6 +82,13 @@ namespace DnsToolkit.Net.Dns
 		/// </summary>
 		// ReSharper disable once InconsistentNaming
 		public bool Is0x20ValidationEnabled { get; set; }
+
+		/// <summary>
+		///   Gets or sets a value indicating whether each name server only gets the queried name up to one label below its zone
+		///   instead of the full name, as described in <a href="https://www.rfc-editor.org/rfc/rfc9156.html">RFC 9156</a>.
+		///   Enabled by default. A server, which answers such a query wrongly, gets the full name.
+		/// </summary>
+		public bool IsQNameMinimisationEnabled { get; set; }
 
 		/// <summary>
 		///   Clears the record cache
@@ -128,15 +136,19 @@ namespace DnsToolkit.Net.Dns
 		/// </summary>
 		private async Task<(DnsMessage Message, DomainName Zone)> ResolveMessageAsync(DomainName name, RecordType recordType, RecordClass recordClass, ResolveContext state, CancellationToken token)
 		{
+			var minimiser = new QNameMinimiser(name, recordType, IsQNameMinimisationEnabled);
+
 			for (; state.QueryCount <= MaximumReferalCount; state.QueryCount++)
 			{
 				var (zone, nameservers) = GetBestNameservers(recordType == RecordType.Ds ? name.GetParentName() : name);
+				var (queryName, queryType) = minimiser.GetQuery(zone);
+				var isMinimised = !queryName.Equals(name);
 
 				DnsMessage? msg = await new DnsClient(nameservers, _transports, false, QueryTimeout)
 				{
 					IsResponseValidationEnabled = IsResponseValidationEnabled,
 					Is0x20ValidationEnabled = Is0x20ValidationEnabled
-				}.ResolveAsync(name, recordType, recordClass, new DnsQueryOptions()
+				}.ResolveAsync(queryName, queryType, recordClass, new DnsQueryOptions()
 				{
 					IsRecursionDesired = false,
 					EDnsOptions = DnsQueryOptions.DefaultQueryOptions.EDnsOptions
@@ -145,7 +157,13 @@ namespace DnsToolkit.Net.Dns
 				if ((msg != null) && ((msg.ReturnCode == ReturnCode.NoError) || (msg.ReturnCode == ReturnCode.NxDomain)))
 				{
 					if (msg.IsAuthoritiveAnswer)
-						return (msg, zone);
+					{
+						if (!isMinimised)
+							return (msg, zone);
+
+						minimiser.OnAuthoritativeAnswer(queryName, msg);
+						continue;
+					}
 
 					// A server may only refer to a zone below its own zone. Otherwise, the server of any zone could take over
 					// the resolution of other zones, e.g. with a referral to the name servers of its own for a top level domain.
@@ -191,9 +209,19 @@ namespace DnsToolkit.Net.Dns
 						}
 					}
 
+					// a server, which cannot handle the minimised query, gets the full name
+					if (isMinimised)
+					{
+						minimiser.Stop();
+						continue;
+					}
+
 					// Response of best known server is not authoritive and has no referrals --> No chance to get a result
 					throw new Exception("Could not resolve " + name.ToString(false));
 				}
+
+				if (isMinimised)
+					minimiser.Stop();
 			}
 
 			// query limit reached without authoritive answer

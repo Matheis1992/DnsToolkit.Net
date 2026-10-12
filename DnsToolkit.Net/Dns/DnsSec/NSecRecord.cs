@@ -45,6 +45,18 @@ namespace DnsToolkit.Net.Dns
 		/// </summary>
 		public List<RecordType> Types { get; private set; }
 
+		/// <summary>
+		///   <para>
+		///     Whether the record denies the existence of its owner name with Compact Denial of Existence, so a NODATA answer
+		///     with it means NXDOMAIN
+		///   </para>
+		///   <para>
+		///     Defined in
+		///     <a href="https://www.rfc-editor.org/rfc/rfc9824.html">RFC 9824</a>.
+		///   </para>
+		/// </summary>
+		public bool IsCompactDenialOfExistence => Types.Contains(RecordType.NxName);
+
 		internal NSecRecord(DomainName name, RecordType recordType, RecordClass recordClass, int timeToLive, IList<byte> resultData, int currentPosition, int length)
 			: base(name, recordType, recordClass, timeToLive)
 		{

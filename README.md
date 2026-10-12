@@ -133,15 +133,20 @@ The library is available on Nuget: [https://www.nuget.org/packages/DnsToolkit.Ne
 * RFC 8484 - DNS Queries over HTTPS (DoH)
 * RFC 8749 - Moving DNSSEC Lookaside Validation (DLV) to Historic Status
 * RFC 8777 - DNS Reverse IP Automatic Multicast Tunneling (AMT) Discovery
+* RFC 8914 - Extended DNS Errors
 * RFC 8945 - Secret Key Transaction Authentication for DNS (TSIG)
 * RFC 8976 - Message Digest for DNS Zones
+* RFC 9156 - DNS Query Name Minimisation to Improve Privacy (recursive resolvers, enabled by default)
 * RFC 9210 - DNS Transport over TCP - Operational Requirements
 * RFC 9373 - EdDSA Value for IPSECKEY
+* RFC 9460 - Service Binding and Parameter Specification via the DNS (SVCB and HTTPS RRs) (Record parsing only)
+* RFC 9461 - Service Binding Mapping for DNS Servers (dohpath parameter)
+* RFC 9540 - Discovery of Oblivious Services via Service Binding Records (ohttp parameter)
+* RFC 9824 - Compact Denial of Existence in DNSSEC
 * draft-vixie-dnsext-dns0x20 - Use of Bit 0x20 in DNS Labels to Improve Transaction Identity
 * draft-sekar-dns-llq - DNS Long-Lived Queries
 * draft-sekar-dns-ul - Dynamic DNS Update Leases
 * draft-cheshire-edns0-owner-option - EDNS0 OWNER Option
-* draft-ietf-dnsop-svcb-https - Service binding and parameter specification via the DNS (DNS SVCB and HTTPS RRs) (Record parsing only)
 
 # License
 The library is released under [Apache License 2.0](LICENSE)
