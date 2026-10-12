@@ -9,8 +9,8 @@ netstandard2.0, net8.0 and net10.0 instead of net6.0 only. All credit for the li
 * Targets netstandard2.0 (e.g. .NET Framework 4.7.2+), net8.0 and net10.0
 * `TlsClientTransport` and `TlsServerTransport` can be created with explicit TLS parameters on all targets. The constructors taking `SslClientAuthenticationOptions` and `SslServerAuthenticationOptions` are available on net8.0 and net10.0 only.
 * The TLS handshake of `TlsServerTransport` is limited by the timeout of the transport.
+* The DNS over HTTPS server (`HttpsServerTransport`, `MapDns`) is removed, so the package does not require ASP.NET Core. The DNS over HTTPS client is available.
 * On netstandard2.0:
-	* The DNS over HTTPS server (`HttpsServerTransport`, `MapDns`) is not available, as it requires ASP.NET Core. The DNS over HTTPS client is available.
 	* Pending socket operations cannot be cancelled. On cancellation the library stops waiting for them and closes the affected connections where possible.
 
 # Nuget Package
@@ -130,7 +130,7 @@ The library is available on Nuget: [https://www.nuget.org/packages/DnsToolkit.Ne
 * RFC 8080 - Edwards-Curve Digital Security Algorithm (EdDSA) for DNSSEC
 * RFC 8162 - Using Secure DNS to Associate Certificates with Domain Names for S/MIME
 * RFC 8427 - Representing DNS Messages in JSON
-* RFC 8484 - DNS Queries over HTTPS (DoH)
+* RFC 8484 - DNS Queries over HTTPS (DoH) (client only)
 * RFC 8749 - Moving DNSSEC Lookaside Validation (DLV) to Historic Status
 * RFC 8777 - DNS Reverse IP Automatic Multicast Tunneling (AMT) Discovery
 * RFC 8914 - Extended DNS Errors
