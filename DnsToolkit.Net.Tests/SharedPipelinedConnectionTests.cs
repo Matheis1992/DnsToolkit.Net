@@ -221,12 +221,20 @@ public class SharedPipelinedConnectionTests
 		// busy build server the garbage collection could happen before, so the query seemed to be kept by a registration.
 		Assert.True(SpinWait.SpinUntil(() => connection.ReceiveCalls >= 2, TimeSpan.FromSeconds(5)), "The receive loop did not wait for the next message");
 
-		GC.Collect();
-		GC.WaitForPendingFinalizers();
-		GC.Collect();
+		// Also afterwards, the thread of the receive loop can still be in the loop for a moment. The loop is in a try block, so
+		// the JIT may report its last query as alive, until it returned. The garbage is collected again until then; a query,
+		// which is really kept, is still referenced after the timeout.
+		var isCollected = SpinWait.SpinUntil(() =>
+		{
+			GC.Collect();
+			GC.WaitForPendingFinalizers();
+			GC.Collect();
 
-		// the connection of the query and its queue, as a registration could keep either
-		Assert.All(finishedQuery, reference => Assert.False(reference.IsAlive, "The finished query is still referenced, e.g. by a registration on the token of the caller"));
+			// the connection of the query and its queue, as a registration could keep either
+			return finishedQuery.All(reference => !reference.IsAlive);
+		}, TimeSpan.FromSeconds(5));
+
+		Assert.True(isCollected, "The finished query is still referenced, e.g. by a registration on the token of the caller");
 	}
 
 	[MethodImpl(MethodImplOptions.NoInlining)]
