@@ -73,31 +73,32 @@ namespace DnsToolkit.Net
 			}
 		}
 
+		/// <summary>
+		///   Checks without blocking, if the remote side closed the connection
+		/// </summary>
 		public static bool IsConnected(this TcpClient client)
 		{
 			if (!client.Connected)
 				return false;
 
-			if (client.Client.Poll(0, SelectMode.SelectRead))
+			// No data is read, not even peeked: a pending read of the connection, e.g. the receive loop of a pooled connection,
+			// may take the data meanwhile, and the peek then blocked until further data arrived or the receive timeout expired.
+			// Readable without data means, that the remote side closed the connection. As the pending read may also take the
+			// data between both checks, the connection only counts as closed, if this is seen twice in a row.
+			try
 			{
-				if (client.Connected)
+				for (var i = 0; i < 2; i++)
 				{
-					byte[] b = new byte[1];
-					try
-					{
-						if (client.Client.Receive(b, SocketFlags.Peek) == 0)
-						{
-							return false;
-						}
-					}
-					catch
-					{
-						return false;
-					}
+					if (!client.Client.Poll(0, SelectMode.SelectRead) || (client.Client.Available > 0))
+						return true;
 				}
-			}
 
-			return true;
+				return false;
+			}
+			catch
+			{
+				return false;
+			}
 		}
 	}
 }

@@ -37,6 +37,12 @@ internal static class ServiceBindingParameterKeyHelper
 				return "ipv4hint";
 			case ServiceBindingParameterKey.IPv6Hint:
 				return "ipv6hint";
+			case ServiceBindingParameterKey.ECH:
+				return "ech";
+			case ServiceBindingParameterKey.DohPath:
+				return "dohpath";
+			case ServiceBindingParameterKey.ObliviousHttp:
+				return "ohttp";
 			default:
 				return "key" + ((ushort) type);
 		}
@@ -58,6 +64,12 @@ internal static class ServiceBindingParameterKeyHelper
 				return ServiceBindingParameterKey.IPv4Hint;
 			case "ipv6hint":
 				return ServiceBindingParameterKey.IPv6Hint;
+			case "ech":
+				return ServiceBindingParameterKey.ECH;
+			case "dohpath":
+				return ServiceBindingParameterKey.DohPath;
+			case "ohttp":
+				return ServiceBindingParameterKey.ObliviousHttp;
 		}
 
 		if (value.Length > 3 && value.StartsWith("key") && UInt16.TryParse(value[3..], out var typeValue))

@@ -813,6 +813,15 @@ namespace DnsToolkit.Net.Dns
 				}
 			}
 
+			// NXNAME is a meta type of the type bit maps of NSEC records, a query for it is malformed (RFC 9824, section 3.4)
+			if ((query is DnsMessage message) && message.Questions.Any(x => x.RecordType == RecordType.NxName))
+			{
+				var response = query.CreateFailureResponse();
+				response.ReturnCode = ReturnCode.FormatError;
+				response.EDnsOptions?.Options.Add(new ExtendedDnsErrorOption(ExtendedDnsErrorCode.InvalidQueryType));
+				return response;
+			}
+
 			QueryReceivedEventArgs eventArgs = new QueryReceivedEventArgs(query, transportProtocol, remoteEndpoint);
 			await QueryReceived.RaiseAsync(this, eventArgs).ConfigureAwait(false);
 			return eventArgs.Response ?? query.CreateFailureResponse();
@@ -843,7 +852,8 @@ namespace DnsToolkit.Net.Dns
 		public event AsyncEventHandler<ClientConnectedEventArgs>? ClientConnected;
 
 		/// <summary>
-		///   This event is fired whenever a query is received by the server
+		///   This event is fired whenever a query is received by the server. Queries for the meta type NXNAME are answered
+		///   with FORMERR by the server itself.
 		/// </summary>
 		public event AsyncEventHandler<QueryReceivedEventArgs>? QueryReceived;
 

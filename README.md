@@ -9,8 +9,8 @@ netstandard2.0, net8.0 and net10.0 instead of net6.0 only. All credit for the li
 * Targets netstandard2.0 (e.g. .NET Framework 4.7.2+), net8.0 and net10.0
 * `TlsClientTransport` and `TlsServerTransport` can be created with explicit TLS parameters on all targets. The constructors taking `SslClientAuthenticationOptions` and `SslServerAuthenticationOptions` are available on net8.0 and net10.0 only.
 * The TLS handshake of `TlsServerTransport` is limited by the timeout of the transport.
+* The DNS over HTTPS server (`HttpsServerTransport`, `MapDns`) is removed, so the package does not require ASP.NET Core. The DNS over HTTPS client is available.
 * On netstandard2.0:
-	* The DNS over HTTPS server (`HttpsServerTransport`, `MapDns`) is not available, as it requires ASP.NET Core. The DNS over HTTPS client is available.
 	* Pending socket operations cannot be cancelled. On cancellation the library stops waiting for them and closes the affected connections where possible.
 
 # Nuget Package
@@ -130,18 +130,23 @@ The library is available on Nuget: [https://www.nuget.org/packages/DnsToolkit.Ne
 * RFC 8080 - Edwards-Curve Digital Security Algorithm (EdDSA) for DNSSEC
 * RFC 8162 - Using Secure DNS to Associate Certificates with Domain Names for S/MIME
 * RFC 8427 - Representing DNS Messages in JSON
-* RFC 8484 - DNS Queries over HTTPS (DoH)
+* RFC 8484 - DNS Queries over HTTPS (DoH) (client only)
 * RFC 8749 - Moving DNSSEC Lookaside Validation (DLV) to Historic Status
 * RFC 8777 - DNS Reverse IP Automatic Multicast Tunneling (AMT) Discovery
+* RFC 8914 - Extended DNS Errors
 * RFC 8945 - Secret Key Transaction Authentication for DNS (TSIG)
 * RFC 8976 - Message Digest for DNS Zones
+* RFC 9156 - DNS Query Name Minimisation to Improve Privacy (recursive resolvers, enabled by default)
 * RFC 9210 - DNS Transport over TCP - Operational Requirements
 * RFC 9373 - EdDSA Value for IPSECKEY
+* RFC 9460 - Service Binding and Parameter Specification via the DNS (SVCB and HTTPS RRs) (Record parsing only)
+* RFC 9461 - Service Binding Mapping for DNS Servers (dohpath parameter)
+* RFC 9540 - Discovery of Oblivious Services via Service Binding Records (ohttp parameter)
+* RFC 9824 - Compact Denial of Existence in DNSSEC
 * draft-vixie-dnsext-dns0x20 - Use of Bit 0x20 in DNS Labels to Improve Transaction Identity
 * draft-sekar-dns-llq - DNS Long-Lived Queries
 * draft-sekar-dns-ul - Dynamic DNS Update Leases
 * draft-cheshire-edns0-owner-option - EDNS0 OWNER Option
-* draft-ietf-dnsop-svcb-https - Service binding and parameter specification via the DNS (DNS SVCB and HTTPS RRs) (Record parsing only)
 
 # License
 The library is released under [Apache License 2.0](LICENSE)

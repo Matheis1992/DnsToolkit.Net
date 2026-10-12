@@ -26,12 +26,12 @@ namespace DnsToolkit.Net.Dns;
 ///   <para>ALPN service binding parameter</para>
 ///   <para>
 ///     Defined in
-///     <a href="https://datatracker.ietf.org/doc/draft-ietf-dnsop-svcb-https/12/">draft-ietf-dnsop-svcb-https</a>.
+///     <a href="https://www.rfc-editor.org/rfc/rfc9460.html">RFC 9460</a>.
 ///   </para>
 /// </summary>
 // ReSharper disable once InconsistentNaming
 // ReSharper disable once IdentifierTypo
-internal class ALPNServiceBindingParameter : ServiceBindingParameterBase
+public class ALPNServiceBindingParameter : ServiceBindingParameterBase
 {
 	/// <summary>
 	///   List of Additional supported protocol identifier

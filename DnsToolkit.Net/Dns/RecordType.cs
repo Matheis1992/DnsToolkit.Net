@@ -627,7 +627,7 @@ namespace DnsToolkit.Net.Dns
 		///   <para>Service Binding</para>
 		///   <para>
 		///     Defined in
-		///     <a href="https://datatracker.ietf.org/doc/draft-ietf-dnsop-svcb-https/12/">draft-ietf-dnsop-svcb-https</a>.
+		///     <a href="https://www.rfc-editor.org/rfc/rfc9460.html">RFC 9460</a>.
 		///   </para>
 		/// </summary>
 		SvcB = 64,
@@ -636,7 +636,7 @@ namespace DnsToolkit.Net.Dns
 		///   <para>HTTPS Service Binding</para>
 		///   <para>
 		///     Defined in
-		///     <a href="https://datatracker.ietf.org/doc/draft-ietf-dnsop-svcb-https/12/">draft-ietf-dnsop-svcb-https</a>.
+		///     <a href="https://www.rfc-editor.org/rfc/rfc9460.html">RFC 9460</a>.
 		///   </para>
 		/// </summary>
 		Https = 65,
@@ -730,6 +730,15 @@ namespace DnsToolkit.Net.Dns
 		///   </para>
 		/// </summary>
 		Eui64 = 109,
+
+		/// <summary>
+		///   <para>Nonexistent name, a meta type, which is only used in the type bit maps of NSEC records</para>
+		///   <para>
+		///     Defined in
+		///     <a href="https://www.rfc-editor.org/rfc/rfc9824.html">RFC 9824</a>.
+		///   </para>
+		/// </summary>
+		NxName = 128,
 
 		/// <summary>
 		///   <para>Transaction key</para>

@@ -12,7 +12,7 @@
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
     <Title>DnsToolkit.Net - C#/.Net DNS client/server, DNSSEC, DANE and SPF Library</Title>
     <Authors>Alexander Reinert, Matheis1992</Authors>
-    <Description>A complete managed .Net DNS and DNSSEC client, a DNS server (UDP, TCP, TLS, HTTPS), DANE validation and SPF and SenderID validation. Targets netstandard2.0, net8.0 and net10.0. Based on ARSoft.Tools.Net by Alexander Reinert.</Description>
+    <Description>A complete managed .Net DNS and DNSSEC client, a DNS server (UDP, TCP, TLS), DANE validation and SPF and SenderID validation. Targets netstandard2.0, net8.0 and net10.0. Based on ARSoft.Tools.Net by Alexander Reinert.</Description>
     <PackageProjectUrl>https://github.com/Matheis1992/DnsToolkit.Net</PackageProjectUrl>
     <RepositoryUrl>https://github.com/Matheis1992/DnsToolkit.Net</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
@@ -20,9 +20,9 @@
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <PackageRequireLicenseAcceptance>true</PackageRequireLicenseAcceptance>
     <Copyright>Copyright 2010..2024 Alexander Reinert, 2026 Matheis1992</Copyright>
-    <!-- a new package, so it starts at 1.0.0 instead of continuing the versions of ARSoft.Tools.Net; the suffix is removed for the release -->
+    <!-- a new package, so it starts at 1.0.0 instead of continuing the versions of ARSoft.Tools.Net. A pre-release adds a
+         VersionSuffix, e.g. preview.1 -->
     <VersionPrefix>1.0.0</VersionPrefix>
-    <VersionSuffix>preview.3</VersionSuffix>
     <!-- strong named, so strong named applications for the .NET Framework can reference it. The key is public on purpose,
          as recommended for open source libraries: the strong name is an identity, not a security feature. -->
     <SignAssembly>true</SignAssembly>
@@ -30,31 +30,32 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="BouncyCastle.Cryptography" Version="2.4.0" />
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.7.0" />
   </ItemGroup>
 
-  <ItemGroup Condition="'$(TargetFramework)' != 'netstandard2.0'">
-    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  <!-- Not part of the .NET runtime (System.IO.Pipelines is since .NET 10). The versions of the runtime, so applications with
+       ASP.NET Core use the assemblies of its shared framework. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0'">
+    <PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="8.0.1" />
+    <PackageReference Include="System.IO.Pipelines" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
+    <PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="10.0.2" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
-    <!-- part of the ASP.NET Core shared framework on net8.0+ -->
-    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="10.0.12" />
-    <PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="10.0.12" />
-    <PackageReference Include="System.IO.Pipelines" Version="10.0.12" />
+    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="10.0.2" />
+    <PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="10.0.2" />
+    <PackageReference Include="System.IO.Pipelines" Version="10.0.2" />
     <PackageReference Include="System.Memory" Version="4.6.3" />
     <PackageReference Include="System.Text.Json" Version="8.0.5" />
-    <PackageReference Include="System.Threading.Channels" Version="10.0.12" />
+    <PackageReference Include="System.Threading.Channels" Version="10.0.2" />
     <PackageReference Include="System.Threading.Tasks.Extensions" Version="4.6.3" />
     <PackageReference Include="PolySharp" Version="1.15.0">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
-
-    <!-- The DNS over HTTPS server requires ASP.NET Core and is only available on net8.0+ -->
-    <Compile Remove="Dns\EndpointRouteBuilderExtensions.cs" />
-    <Compile Remove="Dns\Transport\HttpsServerTransport.cs" />
-    <Compile Remove="Dns\Transport\HttpsServerTransportOptions.cs" />
   </ItemGroup>
 
   <!-- In the root of the package. As content files, NuGet copied them into the projects and the output of every user of the package. -->

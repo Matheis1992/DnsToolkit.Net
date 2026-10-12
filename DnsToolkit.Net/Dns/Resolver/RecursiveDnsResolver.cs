@@ -55,6 +55,7 @@ namespace DnsToolkit.Net.Dns
 			_transports = transports;
 			_resolverHintStore = resolverHintStore ?? new StaticResolverHintStore();
 			IsResponseValidationEnabled = true;
+			IsQNameMinimisationEnabled = true;
 			QueryTimeout = 2000;
 			MaximumReferalCount = 20;
 		}
@@ -81,6 +82,13 @@ namespace DnsToolkit.Net.Dns
 		/// </summary>
 		// ReSharper disable once InconsistentNaming
 		public bool Is0x20ValidationEnabled { get; set; }
+
+		/// <summary>
+		///   Gets or sets a value indicating whether each name server only gets the queried name up to one label below its zone
+		///   instead of the full name, as described in <a href="https://www.rfc-editor.org/rfc/rfc9156.html">RFC 9156</a>.
+		///   Enabled by default.
+		/// </summary>
+		public bool IsQNameMinimisationEnabled { get; set; }
 
 		/// <summary>
 		///   Clears the record cache
@@ -128,15 +136,23 @@ namespace DnsToolkit.Net.Dns
 		/// </summary>
 		private async Task<(DnsMessage Message, DomainName Zone)> ResolveMessageAsync(DomainName name, RecordType recordType, RecordClass recordClass, ResolveContext state, CancellationToken token)
 		{
-			for (; state.QueryCount <= MaximumReferalCount; state.QueryCount++)
+			var minimiser = new QNameMinimiser(name, recordType, IsQNameMinimisationEnabled);
+
+			while (state.QueryCount <= MaximumReferalCount)
 			{
 				var (zone, nameservers) = GetBestNameservers(recordType == RecordType.Ds ? name.GetParentName() : name);
+				var (queryName, queryType) = minimiser.GetQuery(zone);
+				var isMinimised = !queryName.Equals(name);
+
+				// the minimised queries are limited by the minimiser, so they do not use up the limit of the referrals
+				if (!isMinimised)
+					state.QueryCount++;
 
 				DnsMessage? msg = await new DnsClient(nameservers, _transports, false, QueryTimeout)
 				{
 					IsResponseValidationEnabled = IsResponseValidationEnabled,
 					Is0x20ValidationEnabled = Is0x20ValidationEnabled
-				}.ResolveAsync(name, recordType, recordClass, new DnsQueryOptions()
+				}.ResolveAsync(queryName, queryType, recordClass, new DnsQueryOptions()
 				{
 					IsRecursionDesired = false,
 					EDnsOptions = DnsQueryOptions.DefaultQueryOptions.EDnsOptions
@@ -145,14 +161,20 @@ namespace DnsToolkit.Net.Dns
 				if ((msg != null) && ((msg.ReturnCode == ReturnCode.NoError) || (msg.ReturnCode == ReturnCode.NxDomain)))
 				{
 					if (msg.IsAuthoritiveAnswer)
-						return (msg, zone);
+					{
+						// the NXDOMAIN of a minimised query denies the full name as well (RFC 8020)
+						if (!isMinimised || minimiser.OnAuthoritativeAnswer(queryName, msg))
+							return (msg, zone);
+
+						continue;
+					}
 
 					// A server may only refer to a zone below its own zone. Otherwise, the server of any zone could take over
 					// the resolution of other zones, e.g. with a referral to the name servers of its own for a top level domain.
 					List<NsRecord> referalRecords = msg.AuthorityRecords
 						.Where(x =>
 							(x.RecordType == RecordType.Ns)
-							&& (name.Equals(x.Name) || name.IsSubDomainOf(x.Name))
+							&& (queryName.Equals(x.Name) || queryName.IsSubDomainOf(x.Name))
 							&& x.Name.IsSubDomainOf(zone))
 						.OfType<NsRecord>()
 						.ToList();
@@ -193,6 +215,14 @@ namespace DnsToolkit.Net.Dns
 
 					// Response of best known server is not authoritive and has no referrals --> No chance to get a result
 					throw new Exception("Could not resolve " + name.ToString(false));
+				}
+
+				// After a timeout or an error, the same query is sent again, to another server of the zone, as the order of the
+				// servers is random (RFC 9156, section 3, step 6). Like the repetitions of the full name, they use up the limit.
+				if (isMinimised)
+				{
+					state.QueryCount++;
+					minimiser.RepeatLastQuery();
 				}
 			}
 
