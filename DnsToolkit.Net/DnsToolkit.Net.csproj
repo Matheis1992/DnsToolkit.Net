@@ -20,9 +20,9 @@
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <PackageRequireLicenseAcceptance>true</PackageRequireLicenseAcceptance>
     <Copyright>Copyright 2010..2024 Alexander Reinert, 2026 Matheis1992</Copyright>
-    <!-- a new package, so it starts at 1.0.0 instead of continuing the versions of ARSoft.Tools.Net; the suffix is removed for the release -->
+    <!-- a new package, so it starts at 1.0.0 instead of continuing the versions of ARSoft.Tools.Net. A pre-release adds a
+         VersionSuffix, e.g. preview.1 -->
     <VersionPrefix>1.0.0</VersionPrefix>
-    <VersionSuffix>preview.3</VersionSuffix>
     <!-- strong named, so strong named applications for the .NET Framework can reference it. The key is public on purpose,
          as recommended for open source libraries: the strong name is an identity, not a security feature. -->
     <SignAssembly>true</SignAssembly>
