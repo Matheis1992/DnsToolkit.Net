@@ -31,38 +31,46 @@ namespace DnsToolkit.Net.Dns;
 internal sealed class QNameMinimiser
 {
 	/// <summary>
-	///   The limit of minimised queries for a name (MAX_MINIMISE_COUNT of RFC 9156), so a name with many labels does not
-	///   cause a query for every label
+	///   The limit of iterations for a name, including the query of the full name (MAX_MINIMISE_COUNT of RFC 9156), so a name
+	///   with many labels does not cause a query for every label
 	/// </summary>
-	internal const int MAX_MINIMISED_QUERIES = 10;
+	internal const int MAX_MINIMISE_COUNT = 10;
+
+	/// <summary>
+	///   The number of the first iterations, which add one label each (MINIMISE_ONE_LAB of RFC 9156). The later ones add
+	///   several labels, so the full name is reached within <see cref="MAX_MINIMISE_COUNT" /> iterations.
+	/// </summary>
+	internal const int MINIMISE_ONE_LAB = 4;
 
 	private readonly DomainName _name;
 	private readonly RecordType _recordType;
 	private bool _isEnabled;
-	private int _minimisedQueries;
+	private int _iterations;
 	private int _answeredLabelCount;
 
 	public QNameMinimiser(DomainName name, RecordType recordType, bool isEnabled)
 	{
 		_name = name;
 		_recordType = recordType;
-		// a DS record is queried at the parent zone, which already is the server of the name
-		_isEnabled = isEnabled && (recordType != RecordType.Ds);
+		// a DS record is queried at the parent zone, the queries up to it are minimised like the others (RFC 9156, section 3)
+		_isEnabled = isEnabled;
 	}
 
 	/// <summary>
-	///   The name and type of the next query to the servers of the zone
+	///   The name and type of the next query to the servers of the zone. For a DS record, the zone is the one of the parent.
 	/// </summary>
 	public (DomainName Name, RecordType RecordType) GetQuery(DomainName zone)
 	{
-		if (_isEnabled && (_minimisedQueries < MAX_MINIMISED_QUERIES))
+		if (_isEnabled)
 		{
-			// one label below the zone, or below the last name, which the servers of the zone answered without a referral
-			var labelCount = Math.Max(zone.LabelCount, _answeredLabelCount) + 1;
+			// below the zone, or below the last name, which the servers of the zone answered without a referral
+			var exposedLabelCount = Math.Max(zone.LabelCount, _answeredLabelCount);
+			var labelCount = exposedLabelCount + GetLabelsToAdd(_name.LabelCount - exposedLabelCount);
+			_iterations++;
+
 			if (labelCount < _name.LabelCount)
 			{
-				_minimisedQueries++;
-				// the type A, as some servers answer queries of the type NS wrongly (RFC 9156, section 3)
+				// the type A, as it causes the least problems with servers and middleboxes (RFC 9156, section 2.1)
 				return (_name.GetParentName(_name.LabelCount - labelCount), RecordType.A);
 			}
 		}
@@ -71,27 +79,54 @@ internal sealed class QNameMinimiser
 	}
 
 	/// <summary>
-	///   Handles an authoritative answer to a minimised query. The servers of the zone are responsible for the name as well,
-	///   so the next query to them gets one label more.
+	///   The number of labels to add in the next iteration (RFC 9156, section 2.3): one in the first iterations, later the
+	///   hidden labels divided by the remaining iterations, so the remainder is added in the last ones. For 18 labels, these
+	///   are 1, 1, 1, 1, 2, 2, 2, 2, 3, 3.
 	/// </summary>
-	public void OnAuthoritativeAnswer(DomainName queryName, DnsMessage message)
+	private int GetLabelsToAdd(int hiddenLabelCount)
 	{
-		// Some servers answer an empty non-terminal with NXDOMAIN, and an alias redirects the names below of it only with
-		// DNAME, so the full name is sent instead of guessing (the relaxed mode of RFC 9156, section 2.3)
-		if ((message.ReturnCode != ReturnCode.NoError) || message.AnswerRecords.Any(x => x.Name.Equals(queryName) && ((x.RecordType == RecordType.CName) || (x.RecordType == RecordType.DName))))
-		{
-			Stop();
-			return;
-		}
+		var iteration = _iterations + 1;
+		if (iteration <= MINIMISE_ONE_LAB)
+			return 1;
 
-		_answeredLabelCount = queryName.LabelCount;
+		var remainingIterations = MAX_MINIMISE_COUNT - iteration + 1;
+		if (remainingIterations <= 1)
+			return hiddenLabelCount;
+
+		return Math.Max(1, hiddenLabelCount / remainingIterations);
 	}
 
 	/// <summary>
-	///   Sends the full name in all further queries, e.g. as a server answered a minimised query with an error
+	///   Handles an authoritative answer to a minimised query (RFC 9156, section 3, step 6)
 	/// </summary>
-	public void Stop()
+	/// <returns> Whether the answer also denies the full name, so it is the answer to the original query </returns>
+	public bool OnAuthoritativeAnswer(DomainName queryName, DnsMessage message)
 	{
-		_isEnabled = false;
+		// the names below of a nonexistent name do not exist either (RFC 8020)
+		if (message.ReturnCode == ReturnCode.NxDomain)
+			return true;
+
+		// A DNAME redirects the names below of its owner, so the full name has to be resolved from the start. Its query to
+		// the servers of the zone returns the CNAME, which they synthesize for it. A CNAME only redirects its own name, the
+		// names below of it still exist on the servers of the zone.
+		if (message.AnswerRecords.Any(x => (x.RecordType == RecordType.DName) && _name.IsSubDomainOf(x.Name)))
+		{
+			_isEnabled = false;
+			return false;
+		}
+
+		// the name exists without a zone cut, so the servers of the zone get the next query with more labels
+		_answeredLabelCount = queryName.LabelCount;
+		return false;
+	}
+
+	/// <summary>
+	///   Lets the next query be the same as the last one, e.g. to another server of the zone after a timeout or an error
+	///   (RFC 9156, section 3, step 6)
+	/// </summary>
+	public void RepeatLastQuery()
+	{
+		if (_iterations > 0)
+			_iterations--;
 	}
 }

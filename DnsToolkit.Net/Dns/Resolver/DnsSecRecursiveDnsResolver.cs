@@ -88,7 +88,7 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 	/// <summary>
 	///   Gets or sets a value indicating whether each name server only gets the queried name up to one label below its zone
 	///   instead of the full name, as described in <a href="https://www.rfc-editor.org/rfc/rfc9156.html">RFC 9156</a>.
-	///   Enabled by default. A server, which answers such a query wrongly, gets the full name.
+	///   Enabled by default.
 	/// </summary>
 	public bool IsQNameMinimisationEnabled { get; set; }
 
@@ -171,11 +171,15 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 	{
 		var minimiser = new QNameMinimiser(name, recordType, IsQNameMinimisationEnabled);
 
-		for (; resolveContext.QueryCount <= MaximumReferralCount; resolveContext.QueryCount++)
+		while (resolveContext.QueryCount <= MaximumReferralCount)
 		{
 			var (zone, nameservers) = GetBestNameservers(recordType == RecordType.Ds ? name.GetParentName() : name);
 			var (queryName, queryType) = minimiser.GetQuery(zone);
 			var isMinimised = !queryName.Equals(name);
+
+			// the minimised queries are limited by the minimiser, so they do not use up the limit of the referrals
+			if (!isMinimised)
+				resolveContext.QueryCount++;
 
 			DnsMessage? msg = await new DnsClient(nameservers, _transports, true, QueryTimeout)
 			{
@@ -192,11 +196,11 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 			{
 				if (msg.IsAuthoritiveAnswer)
 				{
-					// only the answer to the full name is validated, the minimised queries only find the servers
-					if (!isMinimised)
+					// The NXDOMAIN of a minimised query denies the full name as well (RFC 8020), its NSEC or NSEC3 records are
+					// validated for the full name. The other answers to minimised queries only find the servers.
+					if (!isMinimised || minimiser.OnAuthoritativeAnswer(queryName, msg))
 						return (msg, zone);
 
-					minimiser.OnAuthoritativeAnswer(queryName, msg);
 					continue;
 				}
 
@@ -205,7 +209,7 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 				List<NsRecord> referralRecords = msg.AuthorityRecords
 					.Where(x =>
 						(x.RecordType == RecordType.Ns)
-						&& (name.Equals(x.Name) || name.IsSubDomainOf(x.Name))
+						&& (queryName.Equals(x.Name) || queryName.IsSubDomainOf(x.Name))
 						&& x.Name.IsSubDomainOf(zone))
 					.OfType<NsRecord>()
 					.ToList();
@@ -244,19 +248,17 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 					}
 				}
 
-				// a server, which cannot handle the minimised query, gets the full name
-				if (isMinimised)
-				{
-					minimiser.Stop();
-					continue;
-				}
-
 				// Response of best known server is not authoritive and has no referrals --> No chance to get a result
 				throw new Exception("Could not resolve " + name.ToString(false));
 			}
 
+			// After a timeout or an error, the same query is sent again, to another server of the zone, as the order of the
+			// servers is random (RFC 9156, section 3, step 6). Like the repetitions of the full name, they use up the limit.
 			if (isMinimised)
-				minimiser.Stop();
+			{
+				resolveContext.QueryCount++;
+				minimiser.RepeatLastQuery();
+			}
 		}
 
 		// query limit reached without authoritive answer

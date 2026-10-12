@@ -159,19 +159,39 @@ public class RecursiveDnsResolverTests
 	}
 
 	[Fact]
-	public async Task QNameMinimisation_AfterNxDomainForAnEmptyNonTerminal_SendsTheFullName()
+	public async Task QNameMinimisation_NxDomainForAnIntermediateName_DeniesTheFullName()
 	{
-		// some servers answer an empty non-terminal wrongly with NXDOMAIN
+		// the names below of a nonexistent name do not exist either (RFC 8020), so the full name is not sent (RFC 9156, section 3)
 		using var server = new ScriptedServer((question, response, _) => AnswerExampleZone(question, response, ReturnCode.NxDomain));
 		using var resolver = CreateResolver(server);
 
-		Assert.Equal(new[] { IPAddress.Parse("192.0.2.10") }, (await resolver.ResolveAsync<ARecord>(_deepHost, token: TestToken)).Select(x => x.Address));
-		Assert.Equal(new[] { "test. A", "example.test. A", "b.example.test. A", "a.b.example.test. A" }, server.Questions);
+		Assert.Empty(await resolver.ResolveAsync<ARecord>(_deepHost, token: TestToken));
+		Assert.Equal(new[] { "test. A", "example.test. A", "b.example.test. A" }, server.Questions);
 	}
 
 	[Fact]
-	public async Task QNameMinimisation_AfterACNameForAnIntermediateName_SendsTheFullName()
+	public async Task QNameMinimisation_AfterAnErrorForAnIntermediateName_RepeatsTheMinimisedQuery()
 	{
+		// a timeout or an error is retried with another server of the zone (RFC 9156, section 3, step 6), before the full
+		// name was sent instead
+		using var server = new ScriptedServer((question, response, queryCount) =>
+		{
+			if (question.Name.Equals(DomainName.Parse("b.example.test")) && (queryCount == 1))
+				response.ReturnCode = ReturnCode.ServerFailure;
+			else
+				AnswerExampleZone(question, response, ReturnCode.NoError);
+		});
+		using var resolver = CreateResolver(server);
+
+		Assert.Single(await resolver.ResolveAsync<ARecord>(_deepHost, token: TestToken));
+		Assert.Equal(new[] { "test. A", "example.test. A", "b.example.test. A", "b.example.test. A", "a.b.example.test. A" }, server.Questions);
+	}
+
+	[Fact]
+	public async Task QNameMinimisation_AfterACNameForAnIntermediateName_GoesOnWithTheNextLabel()
+	{
+		// a CNAME only redirects its own name, the names below of it still exist on the servers of the zone
+		var name = DomainName.Parse("c.a.b.example.test");
 		using var server = new ScriptedServer((question, response, _) =>
 		{
 			if (question.Name.Equals(DomainName.Parse("b.example.test")))
@@ -186,8 +206,35 @@ public class RecursiveDnsResolverTests
 		});
 		using var resolver = CreateResolver(server);
 
-		Assert.Single(await resolver.ResolveAsync<ARecord>(_deepHost, token: TestToken));
-		Assert.Equal(new[] { "test. A", "example.test. A", "b.example.test. A", "a.b.example.test. A" }, server.Questions);
+		Assert.Single(await resolver.ResolveAsync<ARecord>(name, token: TestToken));
+		Assert.Equal(new[] { "test. A", "example.test. A", "b.example.test. A", "a.b.example.test. A", "c.a.b.example.test. A" }, server.Questions);
+	}
+
+	[Fact]
+	public async Task QNameMinimisation_AfterADNameAboveTheFullName_SendsTheFullName()
+	{
+		// a DNAME redirects the names below of it, so the servers of the zone synthesize the CNAME for the full name
+		var dName = DomainName.Parse("b.example.test");
+		var name = DomainName.Parse("d.c.a.b.example.test");
+		using var server = new ScriptedServer((question, response, _) =>
+		{
+			if (question.Name.IsSubDomainOf(dName) && !question.Name.IsSubDomainOf(DomainName.Parse("elsewhere.example.test")))
+			{
+				response.IsAuthoritiveAnswer = true;
+				response.AnswerRecords.Add(new DNameRecord(dName, 3600, DomainName.Parse("elsewhere.example.test")));
+				response.AnswerRecords.Add(new CNameRecord(question.Name, 3600, DomainName.Parse(question.Name.ToString().Replace("b.example.test", "elsewhere.example.test"))));
+			}
+			else
+			{
+				AnswerExampleZone(question, response, ReturnCode.NoError);
+			}
+		});
+		using var resolver = CreateResolver(server);
+
+		Assert.Single(await resolver.ResolveAsync<ARecord>(name, token: TestToken));
+
+		// before, the next query was c.a.b.example.test, which the DNAME redirects as well
+		Assert.Equal(new[] { "test. A", "example.test. A", "b.example.test. A", "a.b.example.test. A", "d.c.a.b.example.test. A" }, server.Questions.Take(5));
 	}
 
 	[Fact]
@@ -212,9 +259,56 @@ public class RecursiveDnsResolverTests
 
 		Assert.Single(await resolver.ResolveAsync<ARecord>(name, token: TestToken));
 
-		// not one query per label: after 10 minimised queries, the full name is sent
-		Assert.Equal(QNameMinimiser.MAX_MINIMISED_QUERIES + 1, server.Questions.Count);
+		// not one query per label: the full name is reached within 10 queries (RFC 9156, section 2.3)
+		Assert.Equal(new[] { 1, 2, 3, 4, 5, 6, 8, 10, 12, 14 }, server.Questions.Select(x => DomainName.Parse(x.Split(' ')[0]).LabelCount));
 		Assert.Equal("l1.l2.l3.l4.l5.l6.l7.l8.l9.l10.l11.l12.l13.test. A", server.Questions.Last());
+	}
+
+	[Fact]
+	public void QNameMinimisation_AddsTheLabelsLikeTheExampleOfTheRfc()
+	{
+		// RFC 9156, section 2.3: "For example, for a QNAME with 18 labels ... the number of labels added per iteration are:
+		// 1,1,1,1,2,2,2,2,3,3."
+		var name = new DomainName(Enumerable.Range(1, 18).Select(i => "l" + i).ToArray());
+		var minimiser = new QNameMinimiser(name, RecordType.A, true);
+
+		var labelCounts = new List<int>();
+		while (true)
+		{
+			var (queryName, _) = minimiser.GetQuery(DomainName.Root);
+			labelCounts.Add(queryName.LabelCount);
+			if (queryName.Equals(name))
+				break;
+
+			// every name exists without a zone cut
+			minimiser.OnAuthoritativeAnswer(queryName, new DnsMessage { IsQuery = false, IsAuthoritiveAnswer = true });
+		}
+
+		Assert.Equal(new[] { 1, 1, 1, 1, 2, 2, 2, 2, 3, 3 }, labelCounts.Select((count, i) => count - (i == 0 ? 0 : labelCounts[i - 1])));
+	}
+
+	[Fact]
+	public async Task QNameMinimisation_OfADsQuery_SendsTheFullNameOnlyToTheParentZone()
+	{
+		using var server = new ScriptedServer((question, response, _) => AnswerExampleZone(question, response, ReturnCode.NoError));
+		using var resolver = CreateResolver(server);
+
+		await resolver.ResolveAsync<DsRecord>(DomainName.Parse("b.example.test"), RecordType.Ds, token: TestToken);
+
+		// before, the root got the full name, as DS queries were not minimised
+		Assert.Equal(new[] { "test. A", "example.test. A", "b.example.test. DS" }, server.Questions);
+	}
+
+	[Fact]
+	public async Task QNameMinimisation_DoesNotUseUpTheLimitOfTheReferrals()
+	{
+		using var server = new ScriptedServer((question, response, _) => AnswerExampleZone(question, response, ReturnCode.NoError));
+		using var resolver = CreateResolver(server);
+		// less than the three minimised queries and the query of the full name
+		resolver.MaximumReferalCount = 2;
+
+		// before, the minimised queries counted as well, so the resolution stopped before the full name
+		Assert.Single(await resolver.ResolveAsync<ARecord>(_deepHost, token: TestToken));
 	}
 
 	/// <summary>
@@ -277,7 +371,8 @@ public class RecursiveDnsResolverTests
 
 		if (question.Name.Equals(_bankHost) && (question.RecordType == RecordType.A))
 			response.AnswerRecords.Add(new ARecord(_bankHost, 3600, _bankAddress));
-		else
+		// the names above of the hosts exist, the queries of QNAME minimisation get them
+		else if (!_bankHost.IsSubDomainOf(question.Name) && !_evilHost.IsSubDomainOf(question.Name))
 			response.ReturnCode = ReturnCode.NxDomain;
 	}
 

@@ -327,6 +327,19 @@ public class DnsSecValidatorTests
 	}
 
 	[Fact]
+	public async Task NxDomainOfAnIntermediateName_DeniesTheNamesBelowIt()
+	{
+		// With QNAME minimisation, the NXDOMAIN for child.example.test answers the query for host.child.example.test (RFC 8020),
+		// so its proof is validated for the full name: the NSEC covering child.example.test and the one denying *.example.test.
+		var message = new DnsMessage { ReturnCode = ReturnCode.NxDomain };
+		AddSigned(message, new NSecRecord(DomainName.Parse("b.example.test"), RecordClass.INet, 3600, DomainName.Parse("d.example.test"), new List<RecordType> { RecordType.A, RecordType.RrSig, RecordType.NSec }));
+		AddSigned(message, new NSecRecord(_zone, RecordClass.INet, 3600, DomainName.Parse("a.example.test"), new List<RecordType> { RecordType.Soa, RecordType.Ns, RecordType.DnsKey, RecordType.RrSig, RecordType.NSec }));
+
+		Assert.Equal(DnsSecValidationResult.Signed, await ValidateAsync(_child, message, new List<ARecord>()));
+		Assert.Equal(DnsSecValidationResult.Signed, await ValidateAsync(_childHost, message, new List<ARecord>()));
+	}
+
+	[Fact]
 	public void NxName_IsPresentedByItsName()
 	{
 		Assert.Equal("NXNAME", RecordType.NxName.ToShortString());
