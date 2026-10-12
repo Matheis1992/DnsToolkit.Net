@@ -13,6 +13,9 @@
          The Microsoft Testing Platform, the default of xunit v3, would need the opt-in of the .NET 10 SDK in global.json. -->
     <UseMicrosoftTestingPlatformRunner>false</UseMicrosoftTestingPlatformRunner>
     <IsTestingPlatformApplication>false</IsTestingPlatformApplication>
+    <!-- signed with the key of the library, for its InternalsVisibleTo -->
+    <SignAssembly>true</SignAssembly>
+    <AssemblyOriginatorKeyFile>..\DnsToolkit.Net.snk</AssemblyOriginatorKeyFile>
   </PropertyGroup>
 
   <ItemGroup>
