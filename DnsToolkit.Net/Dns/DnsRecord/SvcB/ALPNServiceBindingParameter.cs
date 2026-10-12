@@ -31,7 +31,7 @@ namespace DnsToolkit.Net.Dns;
 /// </summary>
 // ReSharper disable once InconsistentNaming
 // ReSharper disable once IdentifierTypo
-internal class ALPNServiceBindingParameter : ServiceBindingParameterBase
+public class ALPNServiceBindingParameter : ServiceBindingParameterBase
 {
 	/// <summary>
 	///   List of Additional supported protocol identifier

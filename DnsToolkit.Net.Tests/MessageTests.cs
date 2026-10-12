@@ -110,6 +110,8 @@ public class MessageTests
 		var record = new SvcBRecord(DomainName.Parse("_dns.resolver.example.test"), 3600, 1, DomainName.Parse("doh.example.test"),
 			new Dictionary<ServiceBindingParameterKey, ServiceBindingParameterBase>
 			{
+				// public now, before applications could not create it
+				{ ServiceBindingParameterKey.ALPN, new ALPNServiceBindingParameter(new[] { "h2"u8.ToArray() }) },
 				{ ServiceBindingParameterKey.ECH, new EchServiceBindingParameter(new byte[] { 0xfe, 0x0d, 0x00 }) },
 				// the template is UTF-8 on the wire
 				{ ServiceBindingParameterKey.DohPath, new DohPathServiceBindingParameter("/dns-query/ä{?dns}") },
@@ -124,6 +126,7 @@ public class MessageTests
 		Assert.Equal(new byte[] { 0xfe, 0x0d, 0x00 }, Assert.IsType<EchServiceBindingParameter>(parsedRecord.Parameters[ServiceBindingParameterKey.ECH]).EchConfigList);
 		Assert.Equal("/dns-query/ä{?dns}", Assert.IsType<DohPathServiceBindingParameter>(parsedRecord.Parameters[ServiceBindingParameterKey.DohPath]).Template);
 		Assert.IsType<ObliviousHttpServiceBindingParameter>(parsedRecord.Parameters[ServiceBindingParameterKey.ObliviousHttp]);
+		Assert.Equal("h2"u8.ToArray(), Assert.Single(Assert.IsType<ALPNServiceBindingParameter>(parsedRecord.Parameters[ServiceBindingParameterKey.ALPN]).ALPNIdentifier));
 	}
 
 	[Fact]
