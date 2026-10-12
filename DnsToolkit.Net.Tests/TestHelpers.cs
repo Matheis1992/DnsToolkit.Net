@@ -16,18 +16,27 @@
 // limitations under the License.
 #endregion
 
-using System.Net.Sockets;
-
 namespace DnsToolkit.Net.Tests;
 
 /// <summary>
-///   A test, which needs IPv6. Without it, the test is reported as skipped instead of as passed.
+///   Helpers of all tests, which every test file imports with the global using static of the project file
 /// </summary>
-public sealed class IPv6FactAttribute : FactAttribute
+internal static class TestHelpers
 {
-	public IPv6FactAttribute()
+	/// <summary>
+	///   The token of the running test, which is canceled when the test run is canceled
+	/// </summary>
+	public static CancellationToken TestToken => TestContext.Current.CancellationToken;
+
+	/// <summary>
+	///   Asserts that the task completes within the timeout, and awaits it
+	/// </summary>
+	public static async Task CompletesWithinAsync(Task task, TimeSpan timeout)
 	{
-		if (!Socket.OSSupportsIPv6)
-			Skip = "IPv6 is not supported by the operating system";
+		var completed = await Task.WhenAny(task, Task.Delay(timeout, TestToken));
+		// a canceled test run is reported as canceled, not as a timeout
+		TestToken.ThrowIfCancellationRequested();
+		Assert.True(completed == task, $"The task did not complete within {timeout}");
+		await task;
 	}
 }

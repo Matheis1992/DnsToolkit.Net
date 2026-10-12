@@ -34,14 +34,14 @@ public class DnsServerConnectionLimitTests
 			server.Start();
 
 			Assert.True(await WaitUntilAsync(() => transport.Accepted == 5), $"{transport.Accepted} connections accepted");
-			await Task.Delay(300);
+			await Task.Delay(300, TestToken);
 			Assert.Equal(5, transport.Accepted);
 
 			// closing one connection frees a slot for the next one
 			transport.Connections.First().Close();
 
 			Assert.True(await WaitUntilAsync(() => transport.Accepted == 6), $"{transport.Accepted} connections accepted after one was closed");
-			await Task.Delay(300);
+			await Task.Delay(300, TestToken);
 			Assert.Equal(6, transport.Accepted);
 		}
 		finally

@@ -60,11 +60,11 @@ public class RecursiveDnsResolverTests
 		});
 		using var resolver = CreateResolver(server);
 
-		Assert.Equal(new[] { _bankAddress }, (await resolver.ResolveAsync<ARecord>(_bankHost)).Select(x => x.Address));
+		Assert.Equal(new[] { _bankAddress }, (await resolver.ResolveAsync<ARecord>(_bankHost, token: TestToken)).Select(x => x.Address));
 
 		// before, the address of the attacker was returned and replaced the cached address of www.bank.test
-		Assert.Equal(new[] { _bankAddress }, (await resolver.ResolveAsync<ARecord>(_evilHost)).Select(x => x.Address));
-		Assert.Equal(new[] { _bankAddress }, (await resolver.ResolveAsync<ARecord>(_bankHost)).Select(x => x.Address));
+		Assert.Equal(new[] { _bankAddress }, (await resolver.ResolveAsync<ARecord>(_evilHost, token: TestToken)).Select(x => x.Address));
+		Assert.Equal(new[] { _bankAddress }, (await resolver.ResolveAsync<ARecord>(_bankHost, token: TestToken)).Select(x => x.Address));
 	}
 
 	[Fact]
@@ -97,7 +97,7 @@ public class RecursiveDnsResolverTests
 		});
 		using var resolver = CreateResolver(server);
 
-		Assert.Equal(new[] { targetAddress }, (await resolver.ResolveAsync<ARecord>(_evilHost)).Select(x => x.Address));
+		Assert.Equal(new[] { targetAddress }, (await resolver.ResolveAsync<ARecord>(_evilHost, token: TestToken)).Select(x => x.Address));
 	}
 
 	[Fact]
@@ -126,10 +126,10 @@ public class RecursiveDnsResolverTests
 		});
 		using var resolver = CreateResolver(server);
 
-		await Assert.ThrowsAnyAsync<Exception>(() => resolver.ResolveAsync<ARecord>(_evilHost));
+		await Assert.ThrowsAnyAsync<Exception>(() => resolver.ResolveAsync<ARecord>(_evilHost, token: TestToken));
 
 		// before, the queries for www.bank.test were sent to the name server of the attacker
-		Assert.Equal(new[] { _bankAddress }, (await resolver.ResolveAsync<ARecord>(_bankHost)).Select(x => x.Address));
+		Assert.Equal(new[] { _bankAddress }, (await resolver.ResolveAsync<ARecord>(_bankHost, token: TestToken)).Select(x => x.Address));
 	}
 
 	private static RecursiveDnsResolver CreateResolver(ScriptedServer server)

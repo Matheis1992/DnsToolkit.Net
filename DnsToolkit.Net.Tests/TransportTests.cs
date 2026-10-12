@@ -83,7 +83,7 @@ public class TransportTests : IDisposable
 	{
 		using var client = _server.CreateClient(new TlsClientTransport("localhost", port: _server.TlsPort));
 
-		var msg = await client.ResolveAsync(_name);
+		var msg = await client.ResolveAsync(_name, token: TestToken);
 
 		Assert.Null(msg);
 	}
@@ -94,7 +94,7 @@ public class TransportTests : IDisposable
 		// only this test uses a short handshake timeout, a handshake can take longer if the tests run in parallel
 		using var server = new LocalDnsServer(_records, tlsHandshakeTimeout: 2000);
 		using var idleClient = new TcpClient();
-		await idleClient.ConnectAsync(IPAddress.Loopback, server.TlsPort);
+		await idleClient.ConnectAsync(IPAddress.Loopback, server.TlsPort, TestToken);
 
 		var stopwatch = Stopwatch.StartNew();
 		var closed = await WaitForRemoteCloseAsync(idleClient, TimeSpan.FromSeconds(10));
@@ -109,7 +109,10 @@ public class TransportTests : IDisposable
 		// A server which accepts connections, but never answers the TLS handshake
 		var silentServer = new TcpListener(IPAddress.Loopback, 0);
 		silentServer.Start();
-		var acceptTask = silentServer.AcceptTcpClientAsync();
+		var acceptTask = AcceptAsync();
+
+		// a ValueTask on .NET, a Task from the polyfill of the library on net48
+		async Task<TcpClient> AcceptAsync() => await silentServer.AcceptTcpClientAsync(TestToken);
 
 		try
 		{
@@ -134,8 +137,14 @@ public class TransportTests : IDisposable
 		finally
 		{
 			silentServer.Stop();
-			if (acceptTask.Status == TaskStatus.RanToCompletion)
+			try
+			{
 				(await acceptTask).Dispose();
+			}
+			catch (Exception ex) when (ex is SocketException or ObjectDisposedException or OperationCanceledException)
+			{
+				// the stop ends a pending accept with an exception
+			}
 		}
 	}
 

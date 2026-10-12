@@ -33,6 +33,8 @@ public class AllocationTests
 		using var server = new LocalDnsServer(new DnsRecordBase[] { new ARecord(_name, 60, IPAddress.Parse("192.0.2.1")) });
 		using var client = server.CreateClient(new UdpClientTransport(server.Port));
 
+		// measures the allocations of queries without a token of the caller, a token would add the allocations of linking it
+#pragma warning disable xUnit1051
 		for (var i = 0; i < 20; i++)
 			Assert.NotNull(await client.ResolveAsync(_name));
 
@@ -40,6 +42,7 @@ public class AllocationTests
 		var before = GC.GetTotalAllocatedBytes(true);
 		for (var i = 0; i < queries; i++)
 			Assert.NotNull(await client.ResolveAsync(_name));
+#pragma warning restore xUnit1051
 		var perQuery = (GC.GetTotalAllocatedBytes(true) - before) / queries;
 
 		// client and server together; the socket receive buffer alone is 64 KB on Windows and ~208 KB on Linux
