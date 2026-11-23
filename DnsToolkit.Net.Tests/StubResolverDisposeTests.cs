@@ -85,6 +85,67 @@ public class StubResolverDisposeTests
 		Assert.NotNull(await client.ResolveAsync(_name, token: TestToken));
 	}
 
+	[Theory]
+	[InlineData(false)]
+	[InlineData(true)]
+	public async Task Dispose_OfTheOwnedClient_LetsFurtherQueriesThrow(bool isDnsSec)
+	{
+		var transport = new DisposeCountingTransport();
+
+		// also the constructors, which create the client
+		foreach (var resolver in new[] { CreateResolver(isDnsSec, CreateClient(transport), true), CreateServerListResolver(isDnsSec), CreateDohResolver(isDnsSec) })
+		{
+			resolver.Dispose();
+			await Assert.ThrowsAsync<ObjectDisposedException>(() => resolver.ResolveAsync<ARecord>(_name, token: TestToken));
+		}
+
+		Assert.Equal(0, transport.ConnectCount);
+	}
+
+	[Fact]
+	public async Task Dispose_OfTheOwnedClient_LetsCachedAnswersThrow()
+	{
+		using var server = new LocalDnsServer(new[] { new ARecord(_name, 3600, IPAddress.Parse("192.0.2.1")) });
+		IDnsResolver resolver = new DnsStubResolver(server.CreateClient(new UdpClientTransport(server.Port)), true);
+		Assert.Single(await resolver.ResolveAsync<ARecord>(_name, token: TestToken));
+
+		resolver.Dispose();
+
+		await Assert.ThrowsAsync<ObjectDisposedException>(() => resolver.ResolveAsync<ARecord>(_name, token: TestToken));
+	}
+
+	[Theory]
+	[InlineData(false)]
+	[InlineData(true)]
+	public async Task Dispose_OfTheOwnedClient_LetsTheQueryInProgressThrow(bool isDnsSec)
+	{
+		var transport = new DisposeCountingTransport { Connected = new TaskCompletionSource<IClientConnection?>(TaskCreationOptions.RunContinuationsAsynchronously) };
+		var resolver = CreateResolver(isDnsSec, CreateClient(transport), ownsClient: true);
+		var query = resolver.ResolveAsync<ARecord>(_name, token: TestToken);
+
+		resolver.Dispose();
+		transport.Connected.SetResult(null);
+
+		await Assert.ThrowsAsync<ObjectDisposedException>(() => query);
+	}
+
+	[Theory]
+	[InlineData(false)]
+	[InlineData(true)]
+	public async Task Dispose_WithTheClientOfTheCaller_StillSendsQueries(bool isDnsSec)
+	{
+		var transport = new DisposeCountingTransport();
+		using var client = CreateClient(transport);
+		var resolver = CreateResolver(isDnsSec, client, ownsClient: false);
+		resolver.Dispose();
+
+		// the transport connects to no server
+		var exception = await Assert.ThrowsAsync<Exception>(() => resolver.ResolveAsync<ARecord>(_name, token: TestToken));
+
+		Assert.Equal("DNS request failed", exception.Message);
+		Assert.Equal(1, transport.ConnectCount);
+	}
+
 	[Fact]
 	public void Finalization_DoesNotAccessTheClient()
 	{
@@ -119,7 +180,13 @@ public class StubResolverDisposeTests
 
 	private static DnsClient CreateClient(IClientTransport transport) => new(new[] { IPAddress.Loopback }, new[] { transport }, true, 1000);
 
-	private static IDisposable CreateResolver(bool isDnsSec, DnsClient client, bool ownsClient)
+	private static IDnsResolver CreateServerListResolver(bool isDnsSec)
+		=> isDnsSec ? new SelfValidatingInternalDnsSecStubResolver(_servers) : new DnsStubResolver(_servers);
+
+	private static IDnsResolver CreateDohResolver(bool isDnsSec)
+		=> isDnsSec ? new SelfValidatingInternalDnsSecStubResolver(_endpoint) : new DnsStubResolver(_endpoint);
+
+	private static IDnsResolver CreateResolver(bool isDnsSec, DnsClient client, bool ownsClient)
 		=> isDnsSec ? new SelfValidatingInternalDnsSecStubResolver(client, null, ownsClient) : new DnsStubResolver(client, ownsClient);
 
 	// the resolvers own the client, but are only disposed like by the finalizer, Dispose(true) is not forwarded
@@ -145,7 +212,15 @@ public class StubResolverDisposeTests
 
 	private sealed class DisposeCountingTransport : IClientTransport
 	{
+		private int _connectCount;
 		private int _disposeCount;
+
+		/// <summary>
+		///   The result of the connects, they fail immediately if it is null
+		/// </summary>
+		public TaskCompletionSource<IClientConnection?>? Connected { get; set; }
+
+		public int ConnectCount => Volatile.Read(ref _connectCount);
 
 		public int DisposeCount => Volatile.Read(ref _disposeCount);
 
@@ -155,7 +230,10 @@ public class StubResolverDisposeTests
 		public bool SupportsPooledConnections => false;
 
 		public Task<IClientConnection?> ConnectAsync(DnsClientEndpointInfo endpointInfo, int queryTimeout, CancellationToken token = default)
-			=> Task.FromResult<IClientConnection?>(null);
+		{
+			Interlocked.Increment(ref _connectCount);
+			return Connected?.Task ?? Task.FromResult<IClientConnection?>(null);
+		}
 
 		public Task<IClientConnection?> GetPooledConnectionAsync(DnsClientEndpointInfo endpointInfo, CancellationToken token = default)
 			=> Task.FromResult<IClientConnection?>(null);

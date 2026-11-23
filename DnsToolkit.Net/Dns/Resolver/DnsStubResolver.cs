@@ -32,6 +32,7 @@ namespace DnsToolkit.Net.Dns
 	{
 		private readonly DnsClient _dnsClient;
 		private DnsCache _cache = new DnsCache();
+		private volatile bool _isDisposed;
 
 		/// <summary>
 		///   Provides a new instance using the local configured DNS servers
@@ -107,6 +108,8 @@ namespace DnsToolkit.Net.Dns
 
 		private async Task<List<T>> ResolveAsyncInternal<T>(DomainName name, RecordType recordType, RecordClass recordClass, CancellationToken token, ResolveLoopProtector resolveLoopProtector) where T : DnsRecordBase
 		{
+			ThrowIfDisposed();
+
 			using (resolveLoopProtector.AddOrThrow(name, recordType, recordClass))
 			{
 				if (_cache.TryGetRecords(name, recordType, recordClass, out List<T>? records))
@@ -118,6 +121,8 @@ namespace DnsToolkit.Net.Dns
 
 				if ((msg == null) || ((msg.ReturnCode != ReturnCode.NoError) && (msg.ReturnCode != ReturnCode.NxDomain)))
 				{
+					// the query fails as well, if the client is disposed meanwhile
+					ThrowIfDisposed();
 					throw new Exception("DNS request failed");
 				}
 
@@ -166,9 +171,19 @@ namespace DnsToolkit.Net.Dns
 
 		protected virtual void Dispose(bool isDisposing)
 		{
-			// The client has its own finalizer. The cache is not disposed, as its disposal would let the queries in progress fail.
+			// The client has its own finalizer. The resolver stays usable with a client, which it does not own, so also the
+			// cache is kept.
 			if (isDisposing && OwnsClient)
+			{
+				_isDisposed = true;
 				((IDisposable) _dnsClient).Dispose();
+			}
+		}
+
+		private void ThrowIfDisposed()
+		{
+			if (_isDisposed)
+				throw new ObjectDisposedException(GetType().FullName);
 		}
 
 		~DnsStubResolver()

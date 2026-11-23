@@ -40,6 +40,7 @@ namespace DnsToolkit.Net.Dns
 	{
 		private readonly DnsClient _dnsClient;
 		private DnsCache _cache;
+		private volatile bool _isDisposed;
 		private readonly DnsSecValidator<ResolveLoopProtector> _validator;
 
 		/// <summary>
@@ -154,6 +155,8 @@ namespace DnsToolkit.Net.Dns
 
 		private async Task<DnsSecResult<T>> ResolveSecureAsyncInternal<T>(DomainName name, RecordType recordType, RecordClass recordClass, CancellationToken token, ResolveLoopProtector resolveLoopProtector) where T : DnsRecordBase
 		{
+			ThrowIfDisposed();
+
 			using (resolveLoopProtector.AddOrThrow(name, recordType, recordClass))
 			{
 				if (_cache.TryGetRecords(name, recordType, recordClass, out DnsCacheRecordList<T>? cacheResult))
@@ -170,6 +173,8 @@ namespace DnsToolkit.Net.Dns
 
 				if ((msg == null) || ((msg.ReturnCode != ReturnCode.NoError) && (msg.ReturnCode != ReturnCode.NxDomain)))
 				{
+					// the query fails as well, if the client is disposed meanwhile
+					ThrowIfDisposed();
 					throw new Exception("DNS request failed");
 				}
 
@@ -229,6 +234,8 @@ namespace DnsToolkit.Net.Dns
 
 		Task<DnsMessage?> IInternalDnsSecResolver<ResolveLoopProtector>.ResolveMessageAsync(DomainName name, RecordType recordType, RecordClass recordClass, ResolveLoopProtector state, CancellationToken token)
 		{
+			ThrowIfDisposed();
+
 			return _dnsClient.ResolveAsync(name, RecordType.Ds, recordClass, new DnsQueryOptions()
 			{
 				IsRecursionDesired = true,
@@ -250,9 +257,19 @@ namespace DnsToolkit.Net.Dns
 
 		protected virtual void Dispose(bool isDisposing)
 		{
-			// The client has its own finalizer. The cache is not disposed, as its disposal would let the queries in progress fail.
+			// The client has its own finalizer. The resolver stays usable with a client, which it does not own, so also the
+			// cache is kept.
 			if (isDisposing && OwnsClient)
+			{
+				_isDisposed = true;
 				((IDisposable) _dnsClient).Dispose();
+			}
+		}
+
+		private void ThrowIfDisposed()
+		{
+			if (_isDisposed)
+				throw new ObjectDisposedException(GetType().FullName);
 		}
 
 		~SelfValidatingInternalDnsSecStubResolver()
