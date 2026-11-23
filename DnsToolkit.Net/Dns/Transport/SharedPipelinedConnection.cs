@@ -57,6 +57,12 @@ internal sealed class SharedPipelinedConnection : IPooledConnection
 	/// </summary>
 	internal const int MaxUnansweredQueries = 3;
 
+	/// <summary>
+	///   The limit of the idle timeout, which a server sets with the edns-tcp-keepalive option. The option allows more than
+	///   100 minutes, so many servers with a long timeout would keep many connections open.
+	/// </summary>
+	internal static readonly TimeSpan MaxKeepAliveIdleTimeout = TimeSpan.FromSeconds(30);
+
 	private readonly object _lock = new();
 	private readonly ReceiverQueues<PendingQuery> _queries = new();
 	private bool _isClosed;
@@ -274,8 +280,8 @@ internal sealed class SharedPipelinedConnection : IPooledConnection
 
 	/// <summary>
 	///   Applies the edns-tcp-keepalive option of a response like RFC 7828: the timeout of the server replaces the idle
-	///   timeout, and the connection is closed before it expires. With a timeout of 0, no further queries are sent and the
-	///   connection is closed, once all outstanding responses were received.
+	///   timeout, up to <see cref="MaxKeepAliveIdleTimeout" />, and the connection is closed before it expires. With a timeout
+	///   of 0, no further queries are sent and the connection is closed, once all outstanding responses were received.
 	/// </summary>
 	/// <param name="timeout">The timeout of the server, or null if the response contained no keepalive option</param>
 	public void RestartIdleTimeout(TimeSpan? timeout)
@@ -300,6 +306,9 @@ internal sealed class SharedPipelinedConnection : IPooledConnection
 			{
 				// a tenth earlier, so the connection is not closed by the server, while a query is sent
 				_idleTimeout = timeout.Value - TimeSpan.FromTicks(timeout.Value.Ticks / 10);
+
+				if (_idleTimeout > MaxKeepAliveIdleTimeout)
+					_idleTimeout = MaxKeepAliveIdleTimeout;
 			}
 
 			// The timer runs only while no query is in progress, so the outstanding responses are still received. Even with
