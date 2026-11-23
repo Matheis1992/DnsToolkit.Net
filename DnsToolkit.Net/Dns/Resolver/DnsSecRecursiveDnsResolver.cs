@@ -181,7 +181,8 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 			if (!isMinimised)
 				resolveContext.QueryCount++;
 
-			DnsMessage? msg = await new DnsClient(nameservers, _transports, true, QueryTimeout)
+			// the transports belong to the resolver, so the client must not dispose them, e.g. with its finalizer
+			DnsMessage? msg = await new DnsClient(nameservers, _transports, false, QueryTimeout)
 			{
 				IsResponseValidationEnabled = IsResponseValidationEnabled,
 				Is0x20ValidationEnabled = Is0x20ValidationEnabled
