@@ -382,6 +382,22 @@ public class SharedPipelinedConnectionTests
 		Assert.True(stopwatch.Elapsed >= TimeSpan.FromMilliseconds(1300), $"The connection was closed after {stopwatch.Elapsed}, before the keepalive of the server");
 	}
 
+	[Theory]
+	// the maximum of the option, before, the connection was kept open for 98 minutes
+	[InlineData(6553500, 30000)]
+	[InlineData(40000, 30000)]
+	// a tenth earlier than the timeout of the server
+	[InlineData(20000, 18000)]
+	public void KeepAliveOfTheServer_IsLimited(int serverMilliseconds, int expectedMilliseconds)
+	{
+		var (_, shared) = Create();
+
+		shared.RestartIdleTimeout(TimeSpan.FromMilliseconds(serverMilliseconds));
+
+		Assert.Equal(TimeSpan.FromMilliseconds(expectedMilliseconds), shared.IdleTimeout);
+		shared.MarkFaulty();
+	}
+
 	[Fact]
 	public async Task KeepAliveOfTheServer_DoesNotCloseTheConnection_WhileQueriesAreInProgress()
 	{

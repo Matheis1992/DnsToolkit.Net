@@ -168,32 +168,4 @@ public class RecursiveResolverTransportTests
 			((IDisposable) _server).Dispose();
 		}
 	}
-
-	/// <summary>
-	///   A transport, which can connect to no server, and counts how often it is disposed
-	/// </summary>
-	private sealed class UnreachableTransport : IClientTransport
-	{
-		private int _connectCount;
-		private int _disposeCount;
-
-		public int ConnectCount => Volatile.Read(ref _connectCount);
-		public int DisposeCount => Volatile.Read(ref _disposeCount);
-
-		public ushort MaximumAllowedQuerySize => UInt16.MaxValue;
-		public bool SupportsReliableTransfer => true;
-		public bool SupportsMulticastTransfer => false;
-		public bool SupportsPooledConnections => false;
-
-		public Task<IClientConnection?> ConnectAsync(DnsClientEndpointInfo endpointInfo, int queryTimeout, CancellationToken token = default)
-		{
-			Interlocked.Increment(ref _connectCount);
-			return Task.FromResult<IClientConnection?>(null);
-		}
-
-		public Task<IClientConnection?> GetPooledConnectionAsync(DnsClientEndpointInfo endpointInfo, CancellationToken token = default)
-			=> Task.FromResult<IClientConnection?>(null);
-
-		public void Dispose() => Interlocked.Increment(ref _disposeCount);
-	}
 }
