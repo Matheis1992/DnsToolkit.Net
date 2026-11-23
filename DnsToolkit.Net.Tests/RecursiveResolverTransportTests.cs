@@ -16,6 +16,8 @@
 // limitations under the License.
 #endregion
 
+using System.Net;
+using System.Net.Sockets;
 using System.Runtime.CompilerServices;
 using DnsToolkit.Net.Dns;
 
@@ -38,14 +40,28 @@ public class RecursiveResolverTransportTests
 		RunFailingQuery(resolver);
 		Assert.True(transport.ConnectCount > 0, "The resolver sent no query");
 
-		// the clients of the query are not referenced anymore, so they are finalized
-		for (var i = 0; i < 3; i++)
-		{
-			GC.Collect();
-			GC.WaitForPendingFinalizers();
-		}
+		FinalizeTheClientsOfTheQuery();
 
 		Assert.Equal(0, transport.DisposeCount);
+	}
+
+	[Theory]
+	[InlineData(false)]
+	[InlineData(true)]
+	public void PooledConnection_IsReusedAfterTheClientOfAQueryWasFinalized(bool isDnsSec)
+	{
+		using var server = new FailingTcpServer();
+		using var resolver = CreateResolver(isDnsSec, new TcpClientTransport(server.Port));
+
+		RunFailingQuery(resolver);
+		Assert.Equal(1, server.ConnectionCount);
+		var queryCount = server.QueryCount;
+
+		FinalizeTheClientsOfTheQuery();
+
+		RunFailingQuery(resolver);
+		Assert.True(server.QueryCount > queryCount, "The second query did not reach the server");
+		Assert.Equal(1, server.ConnectionCount);
 	}
 
 	[Theory]
@@ -64,7 +80,20 @@ public class RecursiveResolverTransportTests
 	private static IDnsResolver CreateResolver(bool isDnsSec, IClientTransport transport)
 	{
 		var transports = new[] { transport };
-		return isDnsSec ? new DnsSecRecursiveDnsResolver(null, transports) : new RecursiveDnsResolver(null, transports);
+		var hintStore = new LoopbackHintStore();
+		return isDnsSec ? new DnsSecRecursiveDnsResolver(hintStore, transports) : new RecursiveDnsResolver(hintStore, transports);
+	}
+
+	/// <summary>
+	///   The clients are not referenced anymore after the query, so they are finalized by a garbage collection
+	/// </summary>
+	private static void FinalizeTheClientsOfTheQuery()
+	{
+		for (var i = 0; i < 3; i++)
+		{
+			GC.Collect();
+			GC.WaitForPendingFinalizers();
+		}
 	}
 
 	// not inlined and on another stack, so no reference to the clients remains on the stack of the test
@@ -73,8 +102,71 @@ public class RecursiveResolverTransportTests
 	{
 		Task.Run(async () =>
 		{
-			await Assert.ThrowsAnyAsync<Exception>(() => resolver.ResolveAsync<ARecord>(DomainName.Parse("host.example.test")));
-		}).GetAwaiter().GetResult();
+			// exactly this type, so e.g. a NullReferenceException is no expected failure
+			var exception = await Assert.ThrowsAsync<Exception>(() => resolver.ResolveAsync<ARecord>(DomainName.Parse("host.example.test"), token: TestToken));
+			Assert.StartsWith("Could not resolve", exception.Message);
+		}, TestToken).GetAwaiter().GetResult();
+	}
+
+	private sealed class LoopbackHintStore : IResolverHintStore
+	{
+		public IReadOnlyList<IPAddress> RootServers { get; } = new[] { IPAddress.Loopback };
+
+		public IReadOnlyList<DsRecord> RootKeys { get; } = Array.Empty<DsRecord>();
+	}
+
+	/// <summary>
+	///   A TCP server, which answers every query with SERVFAIL, and lets the client keep the connection
+	/// </summary>
+	private sealed class FailingTcpServer : IDisposable
+	{
+		private readonly DnsServer _server;
+		private int _connectionCount;
+		private int _queryCount;
+
+		public int Port { get; }
+		public int ConnectionCount => Volatile.Read(ref _connectionCount);
+		public int QueryCount => Volatile.Read(ref _queryCount);
+
+		public FailingTcpServer()
+		{
+			// A free port may be taken by another test (process) before the server binds it, so retry with other ports
+			for (var attempt = 1;; attempt++)
+			{
+				Port = LocalDnsServer.GetFreePort();
+				_server = new DnsServer(new TcpServerTransport(new IPEndPoint(IPAddress.Loopback, Port)));
+				_server.ClientConnected += (_, _) =>
+				{
+					Interlocked.Increment(ref _connectionCount);
+					return Task.CompletedTask;
+				};
+				_server.QueryReceived += (_, e) =>
+				{
+					Interlocked.Increment(ref _queryCount);
+					var response = ((DnsMessage) e.Query).CreateResponseInstance();
+					response.ReturnCode = ReturnCode.ServerFailure;
+					response.EDnsOptions = new OptRecord(1232, new TcpKeepAliveOption(TimeSpan.FromSeconds(25)));
+					e.Response = response;
+					return Task.CompletedTask;
+				};
+
+				try
+				{
+					_server.Start();
+					return;
+				}
+				catch (SocketException) when (attempt < 10)
+				{
+					((IDisposable) _server).Dispose();
+				}
+			}
+		}
+
+		public void Dispose()
+		{
+			_server.Stop();
+			((IDisposable) _server).Dispose();
+		}
 	}
 
 	/// <summary>
