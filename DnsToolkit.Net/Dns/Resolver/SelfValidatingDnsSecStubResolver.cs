@@ -45,11 +45,15 @@ namespace DnsToolkit.Net.Dns
 		/// <summary>
 		///   Provides a new instance using a custom <see cref="DnsClient">DNS client</see>
 		/// </summary>
-		/// <param name="dnsClient"> The <see cref="DnsClient">DNS client</see> to use </param>
+		/// <param name="dnsClient"> The <see cref="DnsClient">DNS client</see> to use, it is not disposed with the resolver </param>
 		/// <param name="resolverHintStore"> The resolver hint store with the root DnsKey hints</param>
 		public SelfValidatingInternalDnsSecStubResolver(DnsClient? dnsClient = null, IResolverHintStore? resolverHintStore = null)
+			: this(dnsClient ?? DnsClient.Default, resolverHintStore, false) { }
+
+		internal SelfValidatingInternalDnsSecStubResolver(DnsClient dnsClient, IResolverHintStore? resolverHintStore, bool ownsClient)
 		{
-			_dnsClient = dnsClient ?? DnsClient.Default;
+			_dnsClient = dnsClient;
+			OwnsClient = ownsClient;
 			_cache = new DnsCache();
 			_validator = new DnsSecValidator<ResolveLoopProtector>(this, resolverHintStore ?? new StaticResolverHintStore());
 		}
@@ -67,7 +71,7 @@ namespace DnsToolkit.Net.Dns
 		/// <param name="servers"> The list of servers to use </param>
 		/// <param name="queryTimeout"> The query timeout in milliseconds </param>
 		public SelfValidatingInternalDnsSecStubResolver(IEnumerable<IPAddress> servers, int queryTimeout)
-			: this(new DnsClient(servers, queryTimeout)) { }
+			: this(new DnsClient(servers, queryTimeout), null, true) { }
 
 		/// <summary>
 		///   Provides a new instance using a list of custom DNS servers and a custom query timeout
@@ -75,7 +79,12 @@ namespace DnsToolkit.Net.Dns
 		/// <param name="dnsOverHttpsEndpoint"> The uri of a DNS over HTTPS server to use </param>
 		/// <param name="queryTimeout"> The query timeout in milliseconds </param>
 		public SelfValidatingInternalDnsSecStubResolver(Uri dnsOverHttpsEndpoint, int queryTimeout = 10000)
-			: this(new DnsClient(new[] { IPAddress.Any, }, new IClientTransport[] { new HttpsClientTransport(dnsOverHttpsEndpoint) }, true, queryTimeout)) { }
+			: this(new DnsClient(new[] { IPAddress.Any, }, new IClientTransport[] { new HttpsClientTransport(dnsOverHttpsEndpoint) }, true, queryTimeout), null, true) { }
+
+		/// <summary>
+		///   True, if the resolver created the client itself and disposes it
+		/// </summary>
+		internal bool OwnsClient { get; }
 
 		/// <summary>
 		///   Resolves specified records.
@@ -239,7 +248,12 @@ namespace DnsToolkit.Net.Dns
 			GC.SuppressFinalize(this);
 		}
 
-		protected virtual void Dispose(bool isDisposing) { }
+		protected virtual void Dispose(bool isDisposing)
+		{
+			// The client has its own finalizer. The cache is not disposed, as its disposal would let the queries in progress fail.
+			if (isDisposing && OwnsClient)
+				((IDisposable) _dnsClient).Dispose();
+		}
 
 		~SelfValidatingInternalDnsSecStubResolver()
 		{

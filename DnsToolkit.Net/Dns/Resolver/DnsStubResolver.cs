@@ -42,10 +42,14 @@ namespace DnsToolkit.Net.Dns
 		/// <summary>
 		///   Provides a new instance using a custom <see cref="DnsClient">DNS client</see>
 		/// </summary>
-		/// <param name="dnsClient"> The <see cref="DnsClient">DNS client</see> to use </param>
+		/// <param name="dnsClient"> The <see cref="DnsClient">DNS client</see> to use, it is not disposed with the resolver </param>
 		public DnsStubResolver(DnsClient dnsClient)
+			: this(dnsClient, false) { }
+
+		internal DnsStubResolver(DnsClient dnsClient, bool ownsClient)
 		{
 			_dnsClient = dnsClient;
+			OwnsClient = ownsClient;
 		}
 
 		/// <summary>
@@ -54,7 +58,7 @@ namespace DnsToolkit.Net.Dns
 		/// <param name="servers"> The list of servers to use </param>
 		/// <param name="queryTimeout"> The query timeout in milliseconds </param>
 		public DnsStubResolver(IEnumerable<IPAddress> servers, int queryTimeout = 10000)
-			: this(new DnsClient(servers, queryTimeout)) { }
+			: this(new DnsClient(servers, queryTimeout), true) { }
 
 		/// <summary>
 		///   Provides a new instance using a list of custom DNS servers and a custom query timeout
@@ -62,7 +66,12 @@ namespace DnsToolkit.Net.Dns
 		/// <param name="dnsOverHttpsEndpoint"> The uri of a DNS over HTTPS server to use </param>
 		/// <param name="queryTimeout"> The query timeout in milliseconds </param>
 		public DnsStubResolver(Uri dnsOverHttpsEndpoint, int queryTimeout = 10000)
-			: this(new DnsClient(new[] { IPAddress.Any, }, new IClientTransport[] { new HttpsClientTransport(dnsOverHttpsEndpoint) }, true, queryTimeout)) { }
+			: this(new DnsClient(new[] { IPAddress.Any, }, new IClientTransport[] { new HttpsClientTransport(dnsOverHttpsEndpoint) }, true, queryTimeout), true) { }
+
+		/// <summary>
+		///   True, if the resolver created the client itself and disposes it
+		/// </summary>
+		internal bool OwnsClient { get; }
 
 		/// <summary>
 		///   Queries a the upstream DNS server(s) for specified records.
@@ -155,7 +164,12 @@ namespace DnsToolkit.Net.Dns
 			GC.SuppressFinalize(this);
 		}
 
-		protected virtual void Dispose(bool isDisposing) { }
+		protected virtual void Dispose(bool isDisposing)
+		{
+			// The client has its own finalizer. The cache is not disposed, as its disposal would let the queries in progress fail.
+			if (isDisposing && OwnsClient)
+				((IDisposable) _dnsClient).Dispose();
+		}
 
 		~DnsStubResolver()
 		{
