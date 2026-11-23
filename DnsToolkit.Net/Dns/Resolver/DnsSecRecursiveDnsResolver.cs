@@ -181,7 +181,7 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 			if (!isMinimised)
 				resolveContext.QueryCount++;
 
-			// the transports belong to the resolver, so the client must not dispose them, e.g. with its finalizer
+			// the transports belong to the resolver, so the client must not dispose them
 			DnsMessage? msg = await new DnsClient(nameservers, _transports, false, QueryTimeout)
 			{
 				IsResponseValidationEnabled = IsResponseValidationEnabled,
@@ -402,6 +402,10 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 
 	protected virtual void Dispose(bool isDisposing)
 	{
+		// not by the finalizer, as the transports may be finalized already
+		if (!isDisposing)
+			return;
+
 		foreach (var transport in _transports)
 		{
 			transport.Dispose();

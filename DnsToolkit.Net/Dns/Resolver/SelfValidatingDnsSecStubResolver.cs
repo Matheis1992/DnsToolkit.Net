@@ -257,8 +257,8 @@ namespace DnsToolkit.Net.Dns
 
 		protected virtual void Dispose(bool isDisposing)
 		{
-			// The client has its own finalizer. The resolver stays usable with a client, which it does not own, so also the
-			// cache is kept.
+			// Not by the finalizer, as the client may be finalized already. The resolver stays usable with a client, which it
+			// does not own, so also the cache is kept.
 			if (isDisposing && OwnsClient)
 			{
 				_isDisposed = true;

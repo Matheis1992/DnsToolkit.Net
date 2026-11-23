@@ -529,7 +529,8 @@ namespace DnsToolkit.Net.Dns
 
 		protected virtual void Dispose(bool isDisposing)
 		{
-			if (_disposeTransports)
+			// not by the finalizer, as the transports may still be used by others or be finalized already
+			if (isDisposing && _disposeTransports)
 			{
 				foreach (var transport in _transports)
 				{
