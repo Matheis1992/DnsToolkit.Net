@@ -44,6 +44,32 @@ public class SpfTests
 	}
 
 	[Theory]
+	[InlineData("192.0.2.1", "%{i}", "192.0.2.1")]
+	[InlineData("2001:db8::1", "%{i}", "2.0.0.1.0.d.b.8.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.1")]
+	[InlineData("2001:db8::cb01", "%{i}", "2.0.0.1.0.d.b.8.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.c.b.0.1")]
+	[InlineData("2001:db8::cb01", "%{ir}.%{v}", "1.0.b.c.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6")]
+	[InlineData("2001:db8::cb01", "%{i4}", "c.b.0.1")]
+	public async Task IpMacro_ExpandsToDottedAddress(string ip, string macro, string expected)
+	{
+		// IPv6 addresses are expanded to the hexadecimal digits separated by dots (RFC 7208 section 7.3)
+		var resolver = new SimulatedResolver()
+			.Add(new TxtRecord(_domain, 60, $"v=spf1 exists:{macro}._spf.example.test -all"))
+			.Add(new ARecord(DomainName.Parse(expected + "._spf.example.test"), 60, IPAddress.Parse("127.0.0.2")));
+
+		Assert.Equal(SpfQualifier.Pass, await CheckAsync(resolver, ip));
+	}
+
+	[Fact]
+	public async Task IpMacro_InIncludeMatchesIPv6Client()
+	{
+		var resolver = new SimulatedResolver()
+			.Add(new TxtRecord(_domain, 60, "v=spf1 include:%{ir}.%{v}.spf.test -all"))
+			.Add(new TxtRecord(DomainName.Parse("1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.spf.test"), 60, "v=spf1 ip6:2001:db8::1 -all"));
+
+		Assert.Equal(SpfQualifier.Pass, await CheckAsync(resolver, "2001:db8::1"));
+	}
+
+	[Theory]
 	[InlineData("192.0.2.5", SpfQualifier.Pass)]
 	[InlineData("192.0.3.5", SpfQualifier.Fail)]
 	public async Task Ip4Mechanism_MatchesNetwork(string ip, SpfQualifier expected)
