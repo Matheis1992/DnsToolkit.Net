@@ -559,7 +559,10 @@ namespace DnsToolkit.Net.Spf
 							letter = domain.ToString(false);
 							break;
 						case "i":
-							letter = String.Join(".", ip.GetAddressBytes().Select(b => b.ToString()));
+							letter = (ip.AddressFamily == AddressFamily.InterNetworkV6)
+								// the hexadecimal digits separated by dots
+								? String.Join(".", ip.GetAddressBytes().SelectMany(b => b.ToString("x2")))
+								: String.Join(".", ip.GetAddressBytes().Select(b => b.ToString()));
 							break;
 						case "p":
 							letter = "unknown";
