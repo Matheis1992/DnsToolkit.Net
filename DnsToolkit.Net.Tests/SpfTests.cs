@@ -138,6 +138,33 @@ public class SpfTests
 		Assert.Equal(SpfQualifier.Fail, await CheckAsync(resolver, "192.0.2.1"));
 	}
 
+	[Theory]
+	[InlineData("ip4:192.0.2.1", SpfQualifier.Pass)]
+	[InlineData("ip4:192.0.2.0/24", SpfQualifier.Pass)]
+	[InlineData("ip4:203.0.113.77", SpfQualifier.Fail)]
+	[InlineData("ip6:::ffff:192.0.2.1", SpfQualifier.Fail)]
+	[InlineData("ip6:::/0", SpfQualifier.Fail)]
+	[InlineData("a", SpfQualifier.Pass)]
+	[InlineData("a/24", SpfQualifier.Pass)]
+	[InlineData("mx", SpfQualifier.Pass)]
+	[InlineData("ptr", SpfQualifier.Pass)]
+	[InlineData("include:other.test", SpfQualifier.Pass)]
+	[InlineData("exists:%{ir}.%{v}._spf.example.test", SpfQualifier.Pass)]
+	public async Task IPv4MappedClient_IsTreatedAsIPv4(string term, SpfQualifier expected)
+	{
+		// RFC 7208 section 5, such addresses are passed by servers with a dual mode socket
+		var resolver = new SimulatedResolver()
+			.Add(new TxtRecord(_domain, 60, $"v=spf1 {term} -all"))
+			.Add(new TxtRecord(DomainName.Parse("other.test"), 60, "v=spf1 ip4:192.0.2.1 -all"))
+			.Add(new MxRecord(_domain, 60, 10, _domain))
+			.Add(new ARecord(_domain, 60, IPAddress.Parse("192.0.2.1")))
+			.Add(new PtrRecord(IPAddress.Parse("192.0.2.1").GetReverseLookupDomain(), 60, _domain))
+			.Add(new ARecord(DomainName.Parse("1.2.0.192.in-addr._spf.example.test"), 60, IPAddress.Parse("127.0.0.2")));
+
+		Assert.Equal(expected, await CheckAsync(resolver, "192.0.2.1"));
+		Assert.Equal(expected, await CheckAsync(resolver, "::ffff:192.0.2.1"));
+	}
+
 	[Fact]
 	public async Task RedirectModifier_UsesRecordOfOtherDomain()
 	{
