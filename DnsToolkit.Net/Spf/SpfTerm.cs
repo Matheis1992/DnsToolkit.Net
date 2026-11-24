@@ -69,11 +69,27 @@ namespace DnsToolkit.Net.Spf
 				SpfMechanismType type = EnumHelper<SpfMechanismType>.TryParse(match.Groups["type"].Value, true, out SpfMechanismType t) ? t : SpfMechanismType.Unknown;
 				string? domain = match.Groups["domain"].Value;
 
-				bool hasPrefixes = (type == SpfMechanismType.A) || (type == SpfMechanismType.Mx);
+				// null, if the mechanism has no such prefix length
+				int? maximumPrefix = null;
+				int? maximumPrefix6 = null;
 
-				if (!TryParsePrefix(match.Groups["prefix"], 32, hasPrefixes, out int? prefix)
-				    || !TryParsePrefix(match.Groups["prefix6"], 128, hasPrefixes, out int? prefix6)
-				    || (prefix6.HasValue && !hasPrefixes))
+				switch (type)
+				{
+					case SpfMechanismType.A:
+					case SpfMechanismType.Mx:
+						maximumPrefix = 32;
+						maximumPrefix6 = 128;
+						break;
+
+					case SpfMechanismType.Ip4:
+					case SpfMechanismType.Ip6:
+						// the range depends on the address and is checked at the evaluation
+						maximumPrefix = Int32.MaxValue;
+						break;
+				}
+
+				if (!TryParsePrefix(match.Groups["prefix"], maximumPrefix, out int? prefix)
+				    || !TryParsePrefix(match.Groups["prefix6"], maximumPrefix6, out int? prefix6))
 				{
 					value = null;
 					return false;
@@ -99,18 +115,18 @@ namespace DnsToolkit.Net.Spf
 			return false;
 		}
 
-		// the prefix lengths of the other mechanisms are checked at the evaluation
-		private static bool TryParsePrefix(Group group, int maximum, bool isChecked, out int? prefix)
+		private static bool TryParsePrefix(Group group, int? maximum, out int? prefix)
 		{
 			prefix = null;
 
 			if (!group.Success)
 				return true;
 
-			if (Int32.TryParse(group.Value, out int parsed))
-				prefix = parsed;
+			if (!maximum.HasValue || !Int32.TryParse(group.Value, out int parsed) || (parsed > maximum.Value))
+				return false;
 
-			return !isChecked || (prefix.HasValue && (prefix.Value <= maximum));
+			prefix = parsed;
+			return true;
 		}
 	}
 }

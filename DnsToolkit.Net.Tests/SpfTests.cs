@@ -104,10 +104,41 @@ public class SpfTests
 	[InlineData("ip4:192.0.2.10//32")]
 	[InlineData("ip6:2001:db8::1//64")]
 	[InlineData("exists:example.test//64")]
+	[InlineData("ip4:192.0.2.10//99999999999")]
+	[InlineData("exists:example.test//99999999999")]
+	[InlineData("ip4:192.0.2.10/99999999999")]
+	[InlineData("ip6:2001:db8::1/99999999999")]
+	[InlineData("exists:example.test/24")]
+	[InlineData("ptr/24")]
+	[InlineData("all/24")]
+	[InlineData("all/99999999999")]
 	public async Task InvalidPrefixLengths_ResultInPermError(string term)
 	{
 		Assert.Equal(SpfQualifier.PermError, await CheckAsync(CreateDualStackResolver(term), "192.0.2.10"));
 		Assert.Equal(SpfQualifier.PermError, await CheckAsync(CreateDualStackResolver(term), "2001:db8::1"));
+	}
+
+	[Theory]
+	[InlineData("ip4:2001:db8::1")]
+	[InlineData("ip4:2001:db8::/32")]
+	[InlineData("ip4:::ffff:192.0.2.10")]
+	[InlineData("ip6:192.0.2.10")]
+	[InlineData("ip6:192.0.2.0/24")]
+	public async Task IpMechanismWithOtherIpVersion_ResultsInPermError(string term)
+	{
+		Assert.Equal(SpfQualifier.PermError, await CheckAsync(CreateDualStackResolver(term), "192.0.2.10"));
+		Assert.Equal(SpfQualifier.PermError, await CheckAsync(CreateDualStackResolver(term), "2001:db8::1"));
+	}
+
+	[Theory]
+	[InlineData("ip4:192.0.2.0/24", SpfQualifier.Pass, SpfQualifier.Fail)]
+	[InlineData("ip4:192.0.2.10", SpfQualifier.Pass, SpfQualifier.Fail)]
+	[InlineData("ip6:2001:db8::/32", SpfQualifier.Fail, SpfQualifier.Pass)]
+	[InlineData("ip6:2001:db8::1", SpfQualifier.Fail, SpfQualifier.Pass)]
+	public async Task IpMechanism_MatchesOnlyItsIpVersion(string term, SpfQualifier expectedIPv4, SpfQualifier expectedIPv6)
+	{
+		Assert.Equal(expectedIPv4, await CheckAsync(CreateDualStackResolver(term), "192.0.2.10"));
+		Assert.Equal(expectedIPv6, await CheckAsync(CreateDualStackResolver(term), "2001:db8::1"));
 	}
 
 	[Theory]
