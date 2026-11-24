@@ -142,6 +142,10 @@ namespace DnsToolkit.Net.Spf
 
 		private async Task<ValidationResult> CheckHostInternalAsync(IPAddress ip, DomainName? domain, string sender, bool expandExplanation, State state, CancellationToken token)
 		{
+			// IPv4 clients of dual mode sockets are treated as IPv4 (RFC 7208, section 5)
+			if (ip is { IsIPv4MappedToIPv6: true })
+				ip = ip.MapToIPv4();
+
 			if ((domain == null) || (domain.IsRoot))
 			{
 				return new ValidationResult() { Result = SpfQualifier.None, Explanation = String.Empty };
