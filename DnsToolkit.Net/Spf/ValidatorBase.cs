@@ -41,6 +41,7 @@ namespace DnsToolkit.Net.Spf
 		protected class State
 		{
 			public int DnsLookupCount { get; set; }
+			public int VoidLookupCount { get; set; }
 		}
 
 		// ReSharper disable once StaticMemberInGenericType
@@ -70,10 +71,19 @@ namespace DnsToolkit.Net.Spf
 		public DomainName? LocalDomain { get; set; }
 
 		/// <summary>
-		///   The maximum number of DNS lookups allowed
-		///   <para>Default is 20</para>
+		///   The maximum number of terms, which cause DNS lookups (RFC 7208, section 4.6.4). Exceeding it results in PermError.
+		///   <para>Default is 10</para>
 		/// </summary>
-		public int DnsLookupLimit { get; set; } = 20;
+		public int DnsLookupLimit { get; set; } = 10;
+
+		/// <summary>
+		///   The maximum number of terms, whose DNS lookup has no answer (RFC 7208, section 4.6.4). Exceeding it results in PermError.
+		///   <para>
+		///     Default is null, no limit. The RFC recommends 2, but this fails also valid mails, as a host, which only has addresses
+		///     of the other IP version than the client, has no answer, too.
+		///   </para>
+		/// </summary>
+		public int? VoidLookupLimit { get; set; }
 
 		protected abstract Task<LoadRecordResult> LoadRecordsAsync(DomainName domain, CancellationToken token);
 
@@ -176,9 +186,6 @@ namespace DnsToolkit.Net.Spf
 			#region Evaluate mechanism
 			foreach (SpfMechanism mechanism in record.Terms.OfType<SpfMechanism>())
 			{
-				if (state.DnsLookupCount > DnsLookupLimit)
-					return new ValidationResult() { Result = SpfQualifier.PermError, Explanation = String.Empty };
-
 				SpfQualifier qualifier = await CheckMechanismAsync(mechanism, ip, domain, sender, state, token).ConfigureAwait(false);
 
 				if (qualifier != SpfQualifier.None)
@@ -195,7 +202,7 @@ namespace DnsToolkit.Net.Spf
 				SpfModifier? redirectModifier = record.Terms.OfType<SpfModifier>().FirstOrDefault(m => m.Type == SpfModifierType.Redirect);
 				if (redirectModifier != null)
 				{
-					if (++state.DnsLookupCount > 10)
+					if (++state.DnsLookupCount > DnsLookupLimit)
 						return new ValidationResult() { Result = SpfQualifier.PermError, Explanation = String.Empty };
 
 					DomainName redirectDomain = await ExpandDomainAsync(redirectModifier.Domain ?? string.Empty, ip, domain, sender, token).ConfigureAwait(false);
@@ -254,14 +261,17 @@ namespace DnsToolkit.Net.Spf
 					return mechanism.Qualifier;
 
 				case SpfMechanismType.A:
-					if (++state.DnsLookupCount > 10)
+					if (++state.DnsLookupCount > DnsLookupLimit)
 						return SpfQualifier.PermError;
 
 					DomainName aMechanismDomain = String.IsNullOrEmpty(mechanism.Domain) ? domain : await ExpandDomainAsync(mechanism.Domain, ip, domain, sender, token).ConfigureAwait(false);
 
-					bool? isAMatch = await IsIpMatchAsync(aMechanismDomain, ip, mechanism.Prefix, mechanism.Prefix6, token).ConfigureAwait(false);
+					bool? isAMatch = await IsIpMatchAsync(aMechanismDomain, ip, mechanism.Prefix, mechanism.Prefix6, token, state).ConfigureAwait(false);
 					if (!isAMatch.HasValue)
 						return SpfQualifier.TempError;
+
+					if (state.VoidLookupCount > VoidLookupLimit)
+						return SpfQualifier.PermError;
 
 					if (isAMatch.Value)
 					{
@@ -271,7 +281,7 @@ namespace DnsToolkit.Net.Spf
 					break;
 
 				case SpfMechanismType.Mx:
-					if (++state.DnsLookupCount > 10)
+					if (++state.DnsLookupCount > DnsLookupLimit)
 						return SpfQualifier.PermError;
 
 					DomainName mxMechanismDomain = String.IsNullOrEmpty(mechanism.Domain) ? domain : await ExpandDomainAsync(mechanism.Domain, ip, domain, sender, token).ConfigureAwait(false);
@@ -280,13 +290,18 @@ namespace DnsToolkit.Net.Spf
 					if ((dnsMxResult == null) || ((dnsMxResult.ReturnCode != ReturnCode.NoError) && (dnsMxResult.ReturnCode != ReturnCode.NxDomain)))
 						return SpfQualifier.TempError;
 
+					if (dnsMxResult.Records!.Count == 0 && ++state.VoidLookupCount > VoidLookupLimit)
+						return SpfQualifier.PermError;
+
 					int mxCheckedCount = 0;
 
-					foreach (MxRecord mxRecord in dnsMxResult.Records!)
+					foreach (MxRecord mxRecord in dnsMxResult.Records)
 					{
-						if (++mxCheckedCount == 10)
-							break;
+						// one address query for each mail exchanger, more than 10 are an error
+						if (++mxCheckedCount > 10)
+							return SpfQualifier.PermError;
 
+						// the void lookup limit is for the terms, so only for the MX query
 						bool? isMxMatch = await IsIpMatchAsync(mxRecord.ExchangeDomainName, ip, mechanism.Prefix, mechanism.Prefix6, token).ConfigureAwait(false);
 						if (!isMxMatch.HasValue)
 							return SpfQualifier.TempError;
@@ -330,19 +345,23 @@ namespace DnsToolkit.Net.Spf
 					break;
 
 				case SpfMechanismType.Ptr:
-					if (++state.DnsLookupCount > 10)
+					if (++state.DnsLookupCount > DnsLookupLimit)
 						return SpfQualifier.PermError;
 
 					DnsResolveResult<PtrRecord> dnsPtrResult = await ResolveDnsAsync<PtrRecord>(ip.GetReverseLookupDomain(), RecordType.Ptr, token).ConfigureAwait(false);
 					if ((dnsPtrResult == null) || ((dnsPtrResult.ReturnCode != ReturnCode.NoError) && (dnsPtrResult.ReturnCode != ReturnCode.NxDomain)))
 						return SpfQualifier.TempError;
 
+					if (dnsPtrResult.Records!.Count == 0 && ++state.VoidLookupCount > VoidLookupLimit)
+						return SpfQualifier.PermError;
+
 					DomainName ptrMechanismDomain = String.IsNullOrEmpty(mechanism.Domain) ? domain : await ExpandDomainAsync(mechanism.Domain, ip, domain, sender, token).ConfigureAwait(false);
 
 					int ptrCheckedCount = 0;
-					foreach (PtrRecord ptrRecord in dnsPtrResult.Records!)
+					foreach (PtrRecord ptrRecord in dnsPtrResult.Records)
 					{
-						if (++ptrCheckedCount == 10)
+						// the names after the tenth are ignored, as they are controlled by the owner of the address
+						if (++ptrCheckedCount > 10)
 							break;
 
 						bool? isPtrMatch = await IsIpMatchAsync(ptrRecord.PointerDomainName, ip, null, null, token).ConfigureAwait(false);
@@ -356,7 +375,7 @@ namespace DnsToolkit.Net.Spf
 					break;
 
 				case SpfMechanismType.Exists:
-					if (++state.DnsLookupCount > 10)
+					if (++state.DnsLookupCount > DnsLookupLimit)
 						return SpfQualifier.PermError;
 
 					if (String.IsNullOrEmpty(mechanism.Domain))
@@ -368,6 +387,9 @@ namespace DnsToolkit.Net.Spf
 					if ((dnsAResult == null) || ((dnsAResult.ReturnCode != ReturnCode.NoError) && (dnsAResult.ReturnCode != ReturnCode.NxDomain)))
 						return SpfQualifier.TempError;
 
+					if ((dnsAResult.Records?.Count ?? 0) == 0 && ++state.VoidLookupCount > VoidLookupLimit)
+						return SpfQualifier.PermError;
+
 					if (dnsAResult.Records?.Count(record => (record.RecordType == RecordType.A)) > 0)
 					{
 						return mechanism.Qualifier;
@@ -376,7 +398,7 @@ namespace DnsToolkit.Net.Spf
 					break;
 
 				case SpfMechanismType.Include:
-					if (++state.DnsLookupCount > 10)
+					if (++state.DnsLookupCount > DnsLookupLimit)
 						return SpfQualifier.PermError;
 
 					if (String.IsNullOrEmpty(mechanism.Domain))
@@ -415,30 +437,34 @@ namespace DnsToolkit.Net.Spf
 			return SpfQualifier.None;
 		}
 
-		private Task<bool?> IsIpMatchAsync(DomainName domain, IPAddress ipAddress, int? prefix4, int? prefix6, CancellationToken token)
+		// counts a void lookup, if a state is passed
+		private Task<bool?> IsIpMatchAsync(DomainName domain, IPAddress ipAddress, int? prefix4, int? prefix6, CancellationToken token, State? state = null)
 		{
 			if (ipAddress.AddressFamily == AddressFamily.InterNetworkV6)
 			{
 				if (prefix6.HasValue)
 					ipAddress = ipAddress.GetNetworkAddress(prefix6.Value);
 
-				return IsIpMatchAsync<AaaaRecord>(domain, ipAddress, prefix6, RecordType.Aaaa, token);
+				return IsIpMatchAsync<AaaaRecord>(domain, ipAddress, prefix6, RecordType.Aaaa, token, state);
 			}
 			else
 			{
 				if (prefix4.HasValue)
 					ipAddress = ipAddress.GetNetworkAddress(prefix4.Value);
 
-				return IsIpMatchAsync<ARecord>(domain, ipAddress, prefix4, RecordType.A, token);
+				return IsIpMatchAsync<ARecord>(domain, ipAddress, prefix4, RecordType.A, token, state);
 			}
 		}
 
-		private async Task<bool?> IsIpMatchAsync<TRecord>(DomainName domain, IPAddress ipAddress, int? prefix, RecordType recordType, CancellationToken token)
+		private async Task<bool?> IsIpMatchAsync<TRecord>(DomainName domain, IPAddress ipAddress, int? prefix, RecordType recordType, CancellationToken token, State? state)
 			where TRecord : DnsRecordBase, IAddressRecord
 		{
 			DnsResolveResult<TRecord> dnsResult = await ResolveDnsAsync<TRecord>(domain, recordType, token).ConfigureAwait(false);
 			if ((dnsResult == null) || ((dnsResult.ReturnCode != ReturnCode.NoError) && (dnsResult.ReturnCode != ReturnCode.NxDomain)))
 				return null;
+
+			if (state != null && dnsResult.Records!.Count == 0)
+				state.VoidLookupCount++;
 
 			foreach (var dnsRecord in dnsResult.Records!)
 			{
@@ -568,7 +594,7 @@ namespace DnsToolkit.Net.Spf
 							int ptrCheckedCount = 0;
 							foreach (PtrRecord ptrRecord in dnsResult.Records!)
 							{
-								if (++ptrCheckedCount == 10)
+								if (++ptrCheckedCount > 10)
 									break;
 
 								bool? isPtrMatch = await IsIpMatchAsync(ptrRecord.PointerDomainName, ip, null, null, token).ConfigureAwait(false);

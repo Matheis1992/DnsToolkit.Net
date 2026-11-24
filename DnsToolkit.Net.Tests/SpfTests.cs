@@ -212,15 +212,185 @@ public class SpfTests
 		Assert.Equal(SpfQualifier.PermError, await CheckAsync(resolver, "192.0.2.1"));
 	}
 
+	[Theory]
+	[InlineData(null, 10, SpfQualifier.Pass)]
+	[InlineData(null, 11, SpfQualifier.PermError)]
+	[InlineData(5, 5, SpfQualifier.Pass)]
+	[InlineData(5, 6, SpfQualifier.PermError)]
+	[InlineData(12, 12, SpfQualifier.Pass)]
+	[InlineData(12, 13, SpfQualifier.PermError)]
+	[InlineData(0, 1, SpfQualifier.PermError)]
+	public async Task DnsLookupLimit_LimitsTheTerms(int? limit, int termCount, SpfQualifier expected)
+	{
+		// only the last term matches
+		var terms = Enumerable.Range(1, termCount).Select(i => $"a:a{i}.test");
+		var resolver = new SimulatedResolver().Add(new TxtRecord(_domain, 60, $"v=spf1 {String.Join(" ", terms)} -all"));
+		for (var i = 1; i <= termCount; i++)
+			resolver.Add(CreateAddressRecord(DomainName.Parse($"a{i}.test"), i == termCount ? "192.0.2.1" : "203.0.113.77"));
+
+		var validator = new SpfValidator { DnsResolver = resolver };
+		if (limit.HasValue)
+			validator.DnsLookupLimit = limit.Value;
+
+		Assert.Equal(expected, await CheckAsync(validator, "192.0.2.1"));
+	}
+
+	[Theory]
+	[InlineData(2, SpfQualifier.Pass)]
+	[InlineData(1, SpfQualifier.PermError)]
+	public async Task DnsLookupLimit_CountsIncludeAndRedirect(int limit, SpfQualifier expected)
+	{
+		var resolver = new SimulatedResolver()
+			.Add(new TxtRecord(_domain, 60, "v=spf1 include:other.test redirect=target.test"))
+			.Add(new TxtRecord(DomainName.Parse("other.test"), 60, "v=spf1 -all"))
+			.Add(new TxtRecord(DomainName.Parse("target.test"), 60, "v=spf1 +all"));
+
+		var validator = new SpfValidator { DnsResolver = resolver, DnsLookupLimit = limit };
+
+		Assert.Equal(expected, await CheckAsync(validator, "192.0.2.1"));
+	}
+
+	[Fact]
+	public async Task DnsLookupLimit_IgnoresTermsWithoutLookup()
+	{
+		var terms = Enumerable.Range(1, 20).Select(i => $"ip4:203.0.113.{i}");
+		var resolver = new SimulatedResolver().Add(new TxtRecord(_domain, 60, $"v=spf1 {String.Join(" ", terms)} ip4:192.0.2.1 -all"));
+
+		Assert.Equal(SpfQualifier.Pass, await CheckAsync(resolver, "192.0.2.1"));
+	}
+
+	[Theory]
+	[InlineData("a:void1.test a:void2.test", SpfQualifier.Pass)]
+	[InlineData("a:void1.test a:void2.test a:void3.test", SpfQualifier.PermError)]
+	[InlineData("mx:void1.test mx:void2.test", SpfQualifier.Pass)]
+	[InlineData("mx:void1.test mx:void2.test mx:void3.test", SpfQualifier.PermError)]
+	[InlineData("exists:void1.test exists:void2.test", SpfQualifier.Pass)]
+	[InlineData("exists:void1.test exists:void2.test exists:void3.test", SpfQualifier.PermError)]
+	[InlineData("ptr ptr:void1.test", SpfQualifier.Pass)]
+	[InlineData("ptr ptr:void1.test ptr:void2.test", SpfQualifier.PermError)]
+	[InlineData("a:void1.test mx:void2.test exists:void3.test", SpfQualifier.PermError)]
+	[InlineData("a:void1.test include:other.test", SpfQualifier.Pass)]
+	[InlineData("a:void1.test a:void2.test include:other.test", SpfQualifier.PermError)]
+	public async Task VoidLookupLimit_LimitsTermsWithoutAnswer(string terms, SpfQualifier expected)
+	{
+		// terms, whose query has no answer (RFC 7208 section 4.6.4), also those of included records
+		var resolver = new SimulatedResolver()
+			.Add(new TxtRecord(_domain, 60, $"v=spf1 {terms} +all"))
+			.Add(new TxtRecord(DomainName.Parse("other.test"), 60, "v=spf1 a:void4.test -all"));
+
+		Assert.Equal(expected, await CheckAsync(new SpfValidator { DnsResolver = resolver, VoidLookupLimit = 2 }, "192.0.2.1"));
+	}
+
+	[Theory]
+	[InlineData("192.0.2.1")]
+	[InlineData("2001:db8::1")]
+	public async Task VoidLookups_AreNotLimitedByDefault(string ip)
+	{
+		// hosts with addresses of only one IP version, so each client has three queries without an answer
+		var resolver = new SimulatedResolver()
+			.Add(new TxtRecord(_domain, 60, "v=spf1 a:v4a.test a:v4b.test a:v4c.test a:v6a.test a:v6b.test a:v6c.test -all"));
+		foreach (var name in new[] { "a", "b", "c" })
+		{
+			resolver.Add(CreateAddressRecord(DomainName.Parse($"v4{name}.test"), name == "c" ? "192.0.2.1" : "203.0.113.77"));
+			resolver.Add(CreateAddressRecord(DomainName.Parse($"v6{name}.test"), name == "c" ? "2001:db8::1" : "2001:db8:ffff::9"));
+		}
+
+		Assert.Equal(SpfQualifier.Pass, await CheckAsync(resolver, ip));
+		Assert.Equal(SpfQualifier.PermError, await CheckAsync(new SpfValidator { DnsResolver = resolver, VoidLookupLimit = 2 }, "2001:db8::2"));
+	}
+
+	[Theory]
+	[InlineData(0, 1, SpfQualifier.PermError)]
+	[InlineData(4, 4, SpfQualifier.Pass)]
+	[InlineData(4, 5, SpfQualifier.PermError)]
+	public async Task VoidLookupLimit_IsConfigurable(int limit, int voidCount, SpfQualifier expected)
+	{
+		var terms = Enumerable.Range(1, voidCount).Select(i => $"a:void{i}.test");
+		var resolver = new SimulatedResolver().Add(new TxtRecord(_domain, 60, $"v=spf1 {String.Join(" ", terms)} +all"));
+
+		var validator = new SpfValidator { DnsResolver = resolver, VoidLookupLimit = limit };
+
+		Assert.Equal(expected, await CheckAsync(validator, "192.0.2.1"));
+	}
+
+	[Fact]
+	public async Task VoidLookups_DoNotCountTheAddressesOfMailExchangers()
+	{
+		// mail servers with IPv4 only, the queries for their IPv6 addresses have no answer, but the MX query of the term has one
+		var resolver = new SimulatedResolver().Add(new TxtRecord(_domain, 60, "v=spf1 mx ip6:2001:db8::1 -all"));
+		for (var i = 1; i <= 5; i++)
+		{
+			resolver.Add(new MxRecord(_domain, 60, 10, DomainName.Parse($"m{i}.test")));
+			resolver.Add(CreateAddressRecord(DomainName.Parse($"m{i}.test"), "203.0.113.77"));
+		}
+
+		Assert.Equal(SpfQualifier.Pass, await CheckAsync(new SpfValidator { DnsResolver = resolver, VoidLookupLimit = 2 }, "2001:db8::1"));
+	}
+
+	[Fact]
+	public async Task VoidLookups_DoNotCountFailedQueries()
+	{
+		var resolver = new SimulatedResolver()
+			.Add(new TxtRecord(_domain, 60, "v=spf1 a:void1.test a:void2.test a:failing.test -all"))
+			.Fail(DomainName.Parse("failing.test"));
+
+		Assert.Equal(SpfQualifier.TempError, await CheckAsync(new SpfValidator { DnsResolver = resolver, VoidLookupLimit = 2 }, "192.0.2.1"));
+	}
+
+	[Theory]
+	[InlineData(10, 10, SpfQualifier.Pass)]
+	[InlineData(10, 0, SpfQualifier.Fail)]
+	[InlineData(11, 10, SpfQualifier.Pass)]
+	[InlineData(11, 11, SpfQualifier.PermError)]
+	[InlineData(11, 0, SpfQualifier.PermError)]
+	public async Task MxMechanism_ChecksTenMailExchangers(int count, int matchingIndex, SpfQualifier expected)
+	{
+		var resolver = new SimulatedResolver().Add(new TxtRecord(_domain, 60, "v=spf1 mx -all"));
+		for (var i = 1; i <= count; i++)
+		{
+			var host = DomainName.Parse($"m{i}.test");
+			resolver.Add(new MxRecord(_domain, 60, 10, host));
+			resolver.Add(CreateAddressRecord(host, i == matchingIndex ? "192.0.2.1" : "203.0.113.77"));
+		}
+
+		Assert.Equal(expected, await CheckAsync(resolver, "192.0.2.1"));
+	}
+
+	[Theory]
+	[InlineData("ptr", 10, SpfQualifier.Pass)]
+	[InlineData("ptr", 11, SpfQualifier.Fail)]
+	[InlineData("exists:%{p}._spf.example.test", 10, SpfQualifier.Pass)]
+	[InlineData("exists:%{p}._spf.example.test", 11, SpfQualifier.Fail)]
+	public async Task Ptr_ChecksTenNames(string term, int matchingIndex, SpfQualifier expected)
+	{
+		// the names after the tenth are ignored, without an error
+		const string ip = "192.0.2.1";
+		var resolver = new SimulatedResolver()
+			.Add(new TxtRecord(_domain, 60, $"v=spf1 {term} -all"))
+			.Add(new ARecord(DomainName.Parse("example.test._spf.example.test"), 60, IPAddress.Parse("127.0.0.2")));
+		for (var i = 1; i <= 12; i++)
+		{
+			var host = i == matchingIndex ? _domain : DomainName.Parse($"h{i}.test");
+			resolver.Add(new PtrRecord(IPAddress.Parse(ip).GetReverseLookupDomain(), 60, host));
+			resolver.Add(CreateAddressRecord(host, i == matchingIndex ? ip : "203.0.113.77"));
+		}
+
+		Assert.Equal(expected, await CheckAsync(resolver, ip));
+	}
+
 	private static DnsRecordBase CreateAddressRecord(DomainName name, string address)
 	{
 		var ip = IPAddress.Parse(address);
 		return ip.AddressFamily == AddressFamily.InterNetworkV6 ? new AaaaRecord(name, 60, ip) : new ARecord(name, 60, ip);
 	}
 
-	private static async Task<SpfQualifier> CheckAsync(SimulatedResolver resolver, string ip)
+	private static Task<SpfQualifier> CheckAsync(SimulatedResolver resolver, string ip)
 	{
-		var validator = new SpfValidator { DnsResolver = resolver };
+		return CheckAsync(new SpfValidator { DnsResolver = resolver }, ip);
+	}
+
+	private static async Task<SpfQualifier> CheckAsync(SpfValidator validator, string ip)
+	{
 		var result = await validator.CheckHostAsync(IPAddress.Parse(ip), _domain, "user@example.test");
 		return result.Result;
 	}
