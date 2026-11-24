@@ -306,7 +306,8 @@ namespace DnsToolkit.Net.Spf
 				case SpfMechanismType.Ip4:
 				case SpfMechanismType.Ip6:
 					IPAddress? compareAddress;
-					if (IPAddress.TryParse(mechanism.Domain, out compareAddress))
+					AddressFamily mechanismFamily = (mechanism.Type == SpfMechanismType.Ip6) ? AddressFamily.InterNetworkV6 : AddressFamily.InterNetwork;
+					if (IPAddress.TryParse(mechanism.Domain, out compareAddress) && (compareAddress.AddressFamily == mechanismFamily))
 					{
 						if (ip.AddressFamily != compareAddress.AddressFamily)
 							return SpfQualifier.None;

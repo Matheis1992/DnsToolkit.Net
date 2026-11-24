@@ -64,6 +64,102 @@ public class SpfTests
 		Assert.Equal(SpfQualifier.Fail, await CheckAsync(resolver, "192.0.2.11"));
 	}
 
+	[Theory]
+	[InlineData("a//64", "2001:db8::99", SpfQualifier.Pass)]
+	[InlineData("a//64", "2001:db8:0:1::99", SpfQualifier.Fail)]
+	[InlineData("a//64", "192.0.2.10", SpfQualifier.Pass)]
+	[InlineData("a//64", "192.0.2.11", SpfQualifier.Fail)]
+	[InlineData("a/24//64", "2001:db8::99", SpfQualifier.Pass)]
+	[InlineData("a/24/64", "2001:db8::99", SpfQualifier.Pass)]
+	[InlineData("a/24//64", "192.0.2.11", SpfQualifier.Pass)]
+	[InlineData("a/24", "192.0.2.11", SpfQualifier.Pass)]
+	[InlineData("a/24", "2001:db8::99", SpfQualifier.Fail)]
+	[InlineData("a:example.test//64", "2001:db8::99", SpfQualifier.Pass)]
+	[InlineData("a:example.test/24//64", "192.0.2.11", SpfQualifier.Pass)]
+	[InlineData("a//0", "2001:db8:ffff::9", SpfQualifier.Pass)]
+	[InlineData("a//128", "2001:db8::1", SpfQualifier.Pass)]
+	[InlineData("mx//64", "2001:db8::99", SpfQualifier.Pass)]
+	[InlineData("mx/24//64", "192.0.2.11", SpfQualifier.Pass)]
+	[InlineData("mx:example.test//64", "2001:db8:0:1::99", SpfQualifier.Fail)]
+	public async Task PrefixLengths_ApplyToTheirIpVersion(string term, string ip, SpfQualifier expected)
+	{
+		// dual-cidr-length (RFC 7208 section 5.6)
+		Assert.Equal(expected, await CheckAsync(CreateDualStackResolver(term), ip));
+	}
+
+	[Theory]
+	[InlineData("a/33")]
+	[InlineData("a//129")]
+	[InlineData("a/24//129")]
+	[InlineData("a/99999999999")]
+	[InlineData("a//99999999999")]
+	[InlineData("mx/33")]
+	[InlineData("mx//129")]
+	[InlineData("a//")]
+	[InlineData("a/24//")]
+	[InlineData("a///64")]
+	[InlineData("a/24s")]
+	[InlineData("a//64s")]
+	[InlineData("a//64/24")]
+	[InlineData("ip4:192.0.2.10//32")]
+	[InlineData("ip6:2001:db8::1//64")]
+	[InlineData("exists:example.test//64")]
+	[InlineData("ip4:192.0.2.10//99999999999")]
+	[InlineData("exists:example.test//99999999999")]
+	[InlineData("ip4:192.0.2.10/99999999999")]
+	[InlineData("ip6:2001:db8::1/99999999999")]
+	[InlineData("exists:example.test/24")]
+	[InlineData("ptr/24")]
+	[InlineData("all/24")]
+	[InlineData("all/99999999999")]
+	public async Task InvalidPrefixLengths_ResultInPermError(string term)
+	{
+		Assert.Equal(SpfQualifier.PermError, await CheckAsync(CreateDualStackResolver(term), "192.0.2.10"));
+		Assert.Equal(SpfQualifier.PermError, await CheckAsync(CreateDualStackResolver(term), "2001:db8::1"));
+	}
+
+	[Theory]
+	[InlineData("ip4:2001:db8::1")]
+	[InlineData("ip4:2001:db8::/32")]
+	[InlineData("ip4:::ffff:192.0.2.10")]
+	[InlineData("ip6:192.0.2.10")]
+	[InlineData("ip6:192.0.2.0/24")]
+	public async Task IpMechanismWithOtherIpVersion_ResultsInPermError(string term)
+	{
+		Assert.Equal(SpfQualifier.PermError, await CheckAsync(CreateDualStackResolver(term), "192.0.2.10"));
+		Assert.Equal(SpfQualifier.PermError, await CheckAsync(CreateDualStackResolver(term), "2001:db8::1"));
+	}
+
+	[Theory]
+	[InlineData("ip4:192.0.2.0/24", SpfQualifier.Pass, SpfQualifier.Fail)]
+	[InlineData("ip4:192.0.2.10", SpfQualifier.Pass, SpfQualifier.Fail)]
+	[InlineData("ip6:2001:db8::/32", SpfQualifier.Fail, SpfQualifier.Pass)]
+	[InlineData("ip6:2001:db8::1", SpfQualifier.Fail, SpfQualifier.Pass)]
+	public async Task IpMechanism_MatchesOnlyItsIpVersion(string term, SpfQualifier expectedIPv4, SpfQualifier expectedIPv6)
+	{
+		Assert.Equal(expectedIPv4, await CheckAsync(CreateDualStackResolver(term), "192.0.2.10"));
+		Assert.Equal(expectedIPv6, await CheckAsync(CreateDualStackResolver(term), "2001:db8::1"));
+	}
+
+	[Theory]
+	[InlineData("v=spf1 a//64 -all")]
+	[InlineData("v=spf1 a/24//64 -all")]
+	[InlineData("v=spf1 mx:example.test/24//64 -all")]
+	public void PrefixLengths_AreParsedAndFormatted(string record)
+	{
+		Assert.True(DnsToolkit.Net.Spf.SpfRecord.TryParse(record, out var parsed));
+		Assert.Equal(record, parsed!.ToString());
+	}
+
+	private static SimulatedResolver CreateDualStackResolver(string term)
+	{
+		return new SimulatedResolver()
+			.Add(new TxtRecord(_domain, 60, $"v=spf1 {term} -all"))
+			.Add(new MxRecord(_domain, 60, 10, _domain))
+			.Add(new ARecord(_domain, 60, IPAddress.Parse("192.0.2.10")))
+			.Add(new AaaaRecord(_domain, 60, IPAddress.Parse("2001:db8::1")));
+	}
+
 	[Fact]
 	public async Task MxMechanism_MatchesAddressOfMailExchanger()
 	{
