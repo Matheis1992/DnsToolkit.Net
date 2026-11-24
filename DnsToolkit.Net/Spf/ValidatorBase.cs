@@ -345,7 +345,7 @@ namespace DnsToolkit.Net.Spf
 						if (++ptrCheckedCount == 10)
 							break;
 
-						bool? isPtrMatch = await IsIpMatchAsync(ptrRecord.PointerDomainName, ip, 0, 0, token).ConfigureAwait(false);
+						bool? isPtrMatch = await IsIpMatchAsync(ptrRecord.PointerDomainName, ip, null, null, token).ConfigureAwait(false);
 						if (isPtrMatch.HasValue && isPtrMatch.Value)
 						{
 							if (ptrRecord.PointerDomainName.Equals(ptrMechanismDomain) || (ptrRecord.PointerDomainName.IsSubDomainOf(ptrMechanismDomain)))
@@ -571,7 +571,7 @@ namespace DnsToolkit.Net.Spf
 								if (++ptrCheckedCount == 10)
 									break;
 
-								bool? isPtrMatch = await IsIpMatchAsync(ptrRecord.PointerDomainName, ip, 0, 0, token).ConfigureAwait(false);
+								bool? isPtrMatch = await IsIpMatchAsync(ptrRecord.PointerDomainName, ip, null, null, token).ConfigureAwait(false);
 								if (isPtrMatch.HasValue && isPtrMatch.Value)
 								{
 									if (letter == "unknown" || ptrRecord.PointerDomainName.IsSubDomainOf(domain))

@@ -17,6 +17,7 @@
 #endregion
 
 using System.Net;
+using System.Net.Sockets;
 using DnsToolkit.Net.Dns;
 using DnsToolkit.Net.Spf;
 
@@ -74,6 +75,55 @@ public class SpfTests
 
 		Assert.Equal(SpfQualifier.Pass, await CheckAsync(resolver, "192.0.2.20"));
 		Assert.Equal(SpfQualifier.Fail, await CheckAsync(resolver, "192.0.2.21"));
+	}
+
+	[Theory]
+	[InlineData("192.0.2.1", "192.0.2.1", SpfQualifier.Pass)]
+	[InlineData("192.0.2.1", "203.0.113.77", SpfQualifier.Fail)]
+	[InlineData("2001:db8::1", "2001:db8::1", SpfQualifier.Pass)]
+	[InlineData("2001:db8::1", "2001:db8:ffff::9", SpfQualifier.Fail)]
+	public async Task PtrMechanism_RequiresThatTheNameResolvesToTheClient(string ip, string hostAddress, SpfQualifier expected)
+	{
+		// the PTR record is controlled by the owner of the address, so the name only counts, if it
+		// has the address of the client (RFC 7208 section 5.5)
+		var host = DomainName.Parse("mail.example.test");
+		var resolver = new SimulatedResolver()
+			.Add(new TxtRecord(_domain, 60, "v=spf1 ptr -all"))
+			.Add(new PtrRecord(IPAddress.Parse(ip).GetReverseLookupDomain(), 60, host))
+			.Add(CreateAddressRecord(host, hostAddress));
+
+		Assert.Equal(expected, await CheckAsync(resolver, ip));
+	}
+
+	[Fact]
+	public async Task PtrMechanism_MatchesAnyAddressOfTheName()
+	{
+		var host = DomainName.Parse("mail.example.test");
+		var resolver = new SimulatedResolver()
+			.Add(new TxtRecord(_domain, 60, "v=spf1 ptr -all"))
+			.Add(new PtrRecord(IPAddress.Parse("192.0.2.1").GetReverseLookupDomain(), 60, host))
+			.Add(CreateAddressRecord(host, "203.0.113.77"))
+			.Add(CreateAddressRecord(host, "192.0.2.1"));
+
+		Assert.Equal(SpfQualifier.Pass, await CheckAsync(resolver, "192.0.2.1"));
+	}
+
+	[Theory]
+	[InlineData("192.0.2.1", "192.0.2.1", "mail.example.test")]
+	[InlineData("192.0.2.1", "203.0.113.77", "unknown")]
+	[InlineData("2001:db8::1", "2001:db8::1", "mail.example.test")]
+	[InlineData("2001:db8::1", "2001:db8:ffff::9", "unknown")]
+	public async Task PtrMacro_ExpandsToValidatedNameOnly(string ip, string hostAddress, string expectedName)
+	{
+		// without a validated name %{p} expands to "unknown" (RFC 7208 section 7.3)
+		var host = DomainName.Parse("mail.example.test");
+		var resolver = new SimulatedResolver()
+			.Add(new TxtRecord(_domain, 60, "v=spf1 exists:%{p}._spf.example.test -all"))
+			.Add(new PtrRecord(IPAddress.Parse(ip).GetReverseLookupDomain(), 60, host))
+			.Add(CreateAddressRecord(host, hostAddress))
+			.Add(new ARecord(DomainName.Parse(expectedName + "._spf.example.test"), 60, IPAddress.Parse("127.0.0.2")));
+
+		Assert.Equal(SpfQualifier.Pass, await CheckAsync(resolver, ip));
 	}
 
 	[Fact]
@@ -160,6 +210,12 @@ public class SpfTests
 		resolver.Add(new TxtRecord(DomainName.Parse("i12.test"), 60, "v=spf1 +all"));
 
 		Assert.Equal(SpfQualifier.PermError, await CheckAsync(resolver, "192.0.2.1"));
+	}
+
+	private static DnsRecordBase CreateAddressRecord(DomainName name, string address)
+	{
+		var ip = IPAddress.Parse(address);
+		return ip.AddressFamily == AddressFamily.InterNetworkV6 ? new AaaaRecord(name, 60, ip) : new ARecord(name, 60, ip);
 	}
 
 	private static async Task<SpfQualifier> CheckAsync(SimulatedResolver resolver, string ip)
