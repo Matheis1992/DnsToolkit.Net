@@ -31,7 +31,7 @@ namespace DnsToolkit.Net.Spf
 	public abstract class SpfTerm
 	{
 		// a slash within a macro is a delimiter and not the start of a prefix length
-		private static readonly Regex _parseMechanismRegex = new Regex(@"^(\s)*(?<qualifier>[~+?-]?)(?<type>[a-z0-9]+)(:(?<domain>(?>(%%|%\{[a-z][0-9]*r?[\.\-+,/_=]*\}|[^/])+)))?(/(?<prefix>[0-9]+))?(//?(?<prefix6>[0-9]+))?(\s)*$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+		private static readonly Regex _parseMechanismRegex = new Regex(@"^(\s)*(?<qualifier>[~+?-]?)(?<type>[a-z0-9]+)(:(?<domain>(?>(%%|%\{[a-z][0-9]*r?[\.\-+,/_=]*\}|[^/])+)))?(/(?<prefix>[0-9]+))?(//(?<prefix6>[0-9]+))?(\s)*$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 		private static readonly Regex _parseModifierRegex = new Regex(@"^(\s)*(?<type>[a-z][a-z0-9\-_\.]*)=(?<domain>[^\s]*)(\s)*$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
 		internal static bool TryParse(string s, out SpfTerm? value)

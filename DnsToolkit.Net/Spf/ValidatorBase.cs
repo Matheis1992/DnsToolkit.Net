@@ -40,7 +40,10 @@ namespace DnsToolkit.Net.Spf
 		protected class State
 		{
 			public int DnsLookupCount { get; set; }
-			public int VoidLookupCount { get; set; }
+			internal int VoidLookupCount { get; set; }
+
+			// the number of include and redirect terms, which led to the current record
+			internal int NestingDepth { get; set; }
 
 			// the validated names of the client for the %{p} macro, null until they are needed
 			internal List<DomainName>? ValidatedNames { get; set; }
@@ -56,8 +59,25 @@ namespace DnsToolkit.Net.Spf
 
 		private const int _maximumNameLength = 253;
 
+		// limits the number of queries with any DnsLookupLimit
+		private const int _maximumDnsLookupLimit = 100;
+
+		// limits the recursion with any DnsLookupLimit, so it does not exceed a stack of 256 KB
+		private const int _maximumNestingDepth = 20;
+
 		// ReSharper disable once StaticMemberInGenericType
-		private static readonly Regex _parseMacroRegex = new Regex(@"(%%|%_|%-|%\{(?<letter>[slodiphcrtvSLODIPHCRTV])(?<count>\d*)(?<reverse>[rR]?)(?<delimiter>[\.\-+,/_=]*)})", RegexOptions.Compiled);
+		private static readonly Regex _parseMacroRegex = new Regex(@"(%%|%_|%-|%\{(?<letter>[slodiphcrtvSLODIPHCRTV])(?<count>[0-9]*)(?<reverse>[rR]?)(?<delimiter>[\.\-+,/_=]*)})", RegexOptions.Compiled);
+
+		// the macros %{c}, %{r} and %{t} are only allowed in explanations (RFC 7208, section 7.2)
+		// ReSharper disable once StaticMemberInGenericType
+		private static readonly Regex _termNameRegex = new Regex(@"^(?>(?:[^%]|%[%_\-]|%\{[slodiphvSLODIPHV](?:0*[1-9][0-9]*)?[rR]?[\.\-+,/_=]*\})*)\z", RegexOptions.Compiled);
+
+		// ReSharper disable once StaticMemberInGenericType
+		private static readonly Regex _ip4Regex = new Regex(@"^(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(?:\.(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}\z", RegexOptions.Compiled);
+
+		// without brackets and scope, which IPAddress accepts
+		// ReSharper disable once StaticMemberInGenericType
+		private static readonly Regex _ip6Regex = new Regex(@"^[0-9a-fA-F:\.]+\z", RegexOptions.Compiled);
 
 		/// <summary>
 		///   DnsResolver which is used for DNS lookups
@@ -74,6 +94,7 @@ namespace DnsToolkit.Net.Spf
 		///   IP address of the computer validating the record
 		///   <para>Has no effect anymore, as the macro %{c} is the address of the client (RFC 7208, section 7.2)</para>
 		/// </summary>
+		[Obsolete("Has no effect anymore, as the macro %{c} is the address of the client.")]
 		public IPAddress? LocalIP { get; set; }
 
 		/// <summary>
@@ -84,9 +105,11 @@ namespace DnsToolkit.Net.Spf
 
 		/// <summary>
 		///   The maximum number of terms, which cause DNS lookups (RFC 7208, section 4.6.4). Exceeding it results in PermError.
-		///   <para>Default is 10</para>
+		///   <para>Default is 10. Values above 100 are treated as 100, and more than 20 nested records result in PermError.</para>
 		/// </summary>
 		public int DnsLookupLimit { get; set; } = 10;
+
+		private int EffectiveDnsLookupLimit => Math.Min(DnsLookupLimit, _maximumDnsLookupLimit);
 
 		/// <summary>
 		///   The maximum number of terms, whose DNS lookup has no answer (RFC 7208, section 4.6.4). Exceeding it results in PermError.
@@ -110,7 +133,7 @@ namespace DnsToolkit.Net.Spf
 		[Obsolete("Blocks the calling thread while waiting for the DNS responses. Use CheckHostAsync instead.")]
 		public ValidationResult CheckHost(IPAddress ip, DomainName domain, string sender, bool expandExplanation = false)
 		{
-			return CheckHostInternalAsync(ip, domain, sender, expandExplanation, new State(), default).GetAwaiter().GetResult();
+			return CheckHostRootAsync(ip, domain, sender, expandExplanation, default).GetAwaiter().GetResult();
 		}
 
 		/// <summary>
@@ -126,7 +149,7 @@ namespace DnsToolkit.Net.Spf
 		{
 			// a malformed domain results in None (RFC 7208, section 4.3)
 			DomainName.TryParse(domain, out DomainName? name);
-			return CheckHostInternalAsync(ip, name, sender, expandExplanation, new State(), default).GetAwaiter().GetResult();
+			return CheckHostRootAsync(ip, name, sender, expandExplanation, default).GetAwaiter().GetResult();
 		}
 
 		/// <summary>
@@ -136,11 +159,11 @@ namespace DnsToolkit.Net.Spf
 		/// <param name="domain"> The domain portion of the "MAIL FROM" or "HELO" identity </param>
 		/// <param name="sender"> The "MAIL FROM" or "HELO" identity </param>
 		/// <param name="expandExplanation"> A value indicating if the explanation should be retrieved in case of Fail</param>
-		/// <param name="token"> The token to monitor cancellation requests </param>
+		/// <param name="token"> The token to monitor cancellation requests. A cancelled evaluation results in TempError. </param>
 		/// <returns> The result of the evaluation </returns>
 		public Task<ValidationResult> CheckHostAsync(IPAddress ip, DomainName domain, string sender, bool expandExplanation = false, CancellationToken token = default(CancellationToken))
 		{
-			return CheckHostInternalAsync(ip, domain, sender, expandExplanation, new State(), token);
+			return CheckHostRootAsync(ip, domain, sender, expandExplanation, token);
 		}
 
 		/// <summary>
@@ -150,13 +173,13 @@ namespace DnsToolkit.Net.Spf
 		/// <param name="domain"> The domain portion of the "MAIL FROM" or "HELO" identity </param>
 		/// <param name="sender"> The "MAIL FROM" or "HELO" identity </param>
 		/// <param name="expandExplanation"> A value indicating if the explanation should be retrieved in case of Fail</param>
-		/// <param name="token"> The token to monitor cancellation requests </param>
+		/// <param name="token"> The token to monitor cancellation requests. A cancelled evaluation results in TempError. </param>
 		/// <returns> The result of the evaluation </returns>
 		public Task<ValidationResult> CheckHostAsync(IPAddress ip, string domain, string sender, bool expandExplanation = false, CancellationToken token = default(CancellationToken))
 		{
 			// a malformed domain results in None (RFC 7208, section 4.3)
 			DomainName.TryParse(domain, out DomainName? name);
-			return CheckHostInternalAsync(ip, name, sender, expandExplanation, new State(), token);
+			return CheckHostRootAsync(ip, name, sender, expandExplanation, token);
 		}
 
 		protected class LoadRecordResult
@@ -164,6 +187,19 @@ namespace DnsToolkit.Net.Spf
 			public bool CouldBeLoaded { get; internal set; }
 			public T? Record { get; internal set; }
 			public SpfQualifier ErrorResult { get; internal set; }
+		}
+
+		private async Task<ValidationResult> CheckHostRootAsync(IPAddress ip, DomainName? domain, string sender, bool expandExplanation, CancellationToken token)
+		{
+			try
+			{
+				return await CheckHostInternalAsync(ip, domain, sender, expandExplanation, new State(), token).ConfigureAwait(false);
+			}
+			catch (OperationCanceledException) when (token.IsCancellationRequested)
+			{
+				// not evaluated completely, so the result of the remaining terms must not be used
+				return new ValidationResult() { Result = SpfQualifier.TempError, Explanation = String.Empty };
+			}
 		}
 
 		private async Task<ValidationResult> CheckHostInternalAsync(IPAddress ip, DomainName? domain, string sender, bool expandExplanation, State state, CancellationToken token)
@@ -205,6 +241,10 @@ namespace DnsToolkit.Net.Spf
 			if (record.Terms.OfType<SpfModifier>().GroupBy(m => m.Type).Where(g => (g.Key == SpfModifierType.Exp) || (g.Key == SpfModifierType.Redirect)).Any(g => g.Count() > 1))
 				return new ValidationResult() { Result = SpfQualifier.PermError, Explanation = String.Empty };
 
+			// a syntax error anywhere in the record, also after a matching mechanism (RFC 7208, section 4.6)
+			if (!record.Terms.All(IsValidTerm))
+				return new ValidationResult() { Result = SpfQualifier.PermError, Explanation = String.Empty };
+
 			ValidationResult result = new ValidationResult() { Result = loadResult.ErrorResult };
 
 			#region Evaluate mechanism
@@ -226,18 +266,20 @@ namespace DnsToolkit.Net.Spf
 				SpfModifier? redirectModifier = record.Terms.OfType<SpfModifier>().FirstOrDefault(m => m.Type == SpfModifierType.Redirect);
 				if (redirectModifier != null)
 				{
-					if (++state.DnsLookupCount > DnsLookupLimit)
+					if (++state.DnsLookupCount > EffectiveDnsLookupLimit)
 						return new ValidationResult() { Result = SpfQualifier.PermError, Explanation = String.Empty };
 
 					DomainName? redirectDomain = (await ExpandDomainAsync(redirectModifier.Domain ?? string.Empty, ip, domain, sender, state, token).ConfigureAwait(false)).Name;
 
-					if ((redirectDomain == null) || (redirectDomain.IsRoot) || (redirectDomain.Equals(domain)))
+					if ((redirectDomain == null) || (redirectDomain.IsRoot) || (redirectDomain.Equals(domain)) || (state.NestingDepth >= _maximumNestingDepth))
 					{
 						result.Result = SpfQualifier.PermError;
 					}
 					else
 					{
+						state.NestingDepth++;
 						result = await CheckHostInternalAsync(ip, redirectDomain, sender, expandExplanation, state, token).ConfigureAwait(false);
+						state.NestingDepth--;
 
 						if (result.Result == SpfQualifier.None)
 							result.Result = SpfQualifier.PermError;
@@ -249,28 +291,35 @@ namespace DnsToolkit.Net.Spf
 				SpfModifier? expModifier = record?.Terms?.OfType<SpfModifier>().FirstOrDefault(m => m.Type == SpfModifierType.Exp);
 				if (expModifier != null)
 				{
-					DomainName? target = (await ExpandDomainAsync(expModifier.Domain, ip, domain, sender, state, token, MacroTarget.ExplanationName).ConfigureAwait(false)).Name;
+					try
+					{
+						DomainName? target = (await ExpandDomainAsync(expModifier.Domain, ip, domain, sender, state, token, MacroTarget.ExplanationName).ConfigureAwait(false)).Name;
 
-					if ((target == null) || target.IsRoot)
-					{
-						result.Explanation = String.Empty;
-					}
-					else
-					{
-						DnsResolveResult<TxtRecord> dnsResult = await ResolveDnsAsync<TxtRecord>(target, RecordType.Txt, token).ConfigureAwait(false);
-						if ((dnsResult != null) && (dnsResult.ReturnCode == ReturnCode.NoError))
+						if ((target == null) || target.IsRoot)
 						{
-							// more than one record or a text, which is not ASCII, gives no explanation (RFC 7208, section 6.2)
-							if (dnsResult.Records?.Count == 1)
+							result.Explanation = String.Empty;
+						}
+						else
+						{
+							DnsResolveResult<TxtRecord> dnsResult = await ResolveDnsAsync<TxtRecord>(target, RecordType.Txt, token).ConfigureAwait(false);
+							if ((dnsResult != null) && (dnsResult.ReturnCode == ReturnCode.NoError))
 							{
-								string? explanation = (await ExpandMacroAsync(dnsResult.Records[0].TextData, ip, domain, sender, state, MacroTarget.ExplanationText, token).ConfigureAwait(false)).Text;
-								result.Explanation = (explanation != null) && explanation.All(c => c <= 127) ? explanation : String.Empty;
-							}
-							else
-							{
-								result.Explanation = String.Empty;
+								// more than one record or a text, which is not ASCII or has a syntax error, gives no explanation (RFC 7208, section 6.2)
+								if (dnsResult.Records?.Count == 1)
+								{
+									string? explanation = (await ExpandMacroAsync(dnsResult.Records[0].TextData, ip, domain, sender, state, MacroTarget.ExplanationText, token).ConfigureAwait(false)).Text;
+									result.Explanation = (explanation != null) && explanation.All(c => c <= 127) ? explanation : String.Empty;
+								}
+								else
+								{
+									result.Explanation = String.Empty;
+								}
 							}
 						}
+					}
+					catch (OperationCanceledException) when (token.IsCancellationRequested)
+					{
+						// the result is already known, only its explanation is missing
 					}
 				}
 			}
@@ -282,6 +331,64 @@ namespace DnsToolkit.Net.Spf
 			return result;
 		}
 
+		// the modifier exp and unknown modifiers do not affect the result, so errors in their value are ignored
+		private static bool IsValidTerm(SpfTerm term)
+		{
+			switch (term)
+			{
+				case SpfModifier modifier:
+					return (modifier.Type != SpfModifierType.Redirect) || IsValidTermName(modifier.Domain);
+
+				case SpfMechanism mechanism:
+					switch (mechanism.Type)
+					{
+						case SpfMechanismType.All:
+							return String.IsNullOrEmpty(mechanism.Domain);
+
+						case SpfMechanismType.A:
+						case SpfMechanismType.Mx:
+						case SpfMechanismType.Ptr:
+							return String.IsNullOrEmpty(mechanism.Domain) || IsValidTermName(mechanism.Domain);
+
+						case SpfMechanismType.Exists:
+						case SpfMechanismType.Include:
+							return IsValidTermName(mechanism.Domain);
+
+						case SpfMechanismType.Ip4:
+						case SpfMechanismType.Ip6:
+							return TryParseAddress(mechanism, out _);
+
+						default:
+							return false;
+					}
+
+				default:
+					return true;
+			}
+		}
+
+		private static bool IsValidTermName(string? name)
+		{
+			return !String.IsNullOrEmpty(name) && _termNameRegex.IsMatch(name!);
+		}
+
+		// parses the address of the mechanisms ip4 and ip6 and checks its prefix length (RFC 7208, section 5.6)
+		private static bool TryParseAddress(SpfMechanism mechanism, out IPAddress? address)
+		{
+			bool isIp6 = (mechanism.Type == SpfMechanismType.Ip6);
+			string text = mechanism.Domain ?? String.Empty;
+
+			if (!(isIp6 ? _ip6Regex : _ip4Regex).IsMatch(text)
+			    || !IPAddress.TryParse(text, out address)
+			    || (address.AddressFamily != (isIp6 ? AddressFamily.InterNetworkV6 : AddressFamily.InterNetwork)))
+			{
+				address = null;
+				return false;
+			}
+
+			return !mechanism.Prefix.HasValue || ((mechanism.Prefix.Value >= 0) && (mechanism.Prefix.Value <= (isIp6 ? 128 : 32)));
+		}
+
 		private async Task<SpfQualifier> CheckMechanismAsync(SpfMechanism mechanism, IPAddress ip, DomainName domain, string sender, State state, CancellationToken token)
 		{
 			switch (mechanism.Type)
@@ -290,7 +397,7 @@ namespace DnsToolkit.Net.Spf
 					return mechanism.Qualifier;
 
 				case SpfMechanismType.A:
-					if (++state.DnsLookupCount > DnsLookupLimit)
+					if (++state.DnsLookupCount > EffectiveDnsLookupLimit)
 						return SpfQualifier.PermError;
 
 					(DomainName? aMechanismDomain, SpfQualifier aError) = await ExpandMechanismDomainAsync(mechanism, ip, domain, sender, state, token).ConfigureAwait(false);
@@ -312,7 +419,7 @@ namespace DnsToolkit.Net.Spf
 					break;
 
 				case SpfMechanismType.Mx:
-					if (++state.DnsLookupCount > DnsLookupLimit)
+					if (++state.DnsLookupCount > EffectiveDnsLookupLimit)
 						return SpfQualifier.PermError;
 
 					(DomainName? mxMechanismDomain, SpfQualifier mxError) = await ExpandMechanismDomainAsync(mechanism, ip, domain, sender, state, token).ConfigureAwait(false);
@@ -349,18 +456,13 @@ namespace DnsToolkit.Net.Spf
 
 				case SpfMechanismType.Ip4:
 				case SpfMechanismType.Ip6:
-					IPAddress? compareAddress;
-					AddressFamily mechanismFamily = (mechanism.Type == SpfMechanismType.Ip6) ? AddressFamily.InterNetworkV6 : AddressFamily.InterNetwork;
-					if (IPAddress.TryParse(mechanism.Domain, out compareAddress) && (compareAddress.AddressFamily == mechanismFamily))
+					if (TryParseAddress(mechanism, out IPAddress? compareAddress))
 					{
-						if (ip.AddressFamily != compareAddress.AddressFamily)
+						if (ip.AddressFamily != compareAddress!.AddressFamily)
 							return SpfQualifier.None;
 
 						if (mechanism.Prefix.HasValue)
 						{
-							if ((mechanism.Prefix.Value < 0) || (mechanism.Prefix.Value > (compareAddress.AddressFamily == AddressFamily.InterNetworkV6 ? 128 : 32)))
-								return SpfQualifier.PermError;
-
 							if (ip.GetNetworkAddress(mechanism.Prefix.Value).Equals(compareAddress.GetNetworkAddress(mechanism.Prefix.Value)))
 							{
 								return mechanism.Qualifier;
@@ -379,7 +481,7 @@ namespace DnsToolkit.Net.Spf
 					break;
 
 				case SpfMechanismType.Ptr:
-					if (++state.DnsLookupCount > DnsLookupLimit)
+					if (++state.DnsLookupCount > EffectiveDnsLookupLimit)
 						return SpfQualifier.PermError;
 
 					(DomainName? ptrMechanismDomain, SpfQualifier ptrError) = await ExpandMechanismDomainAsync(mechanism, ip, domain, sender, state, token).ConfigureAwait(false);
@@ -412,7 +514,7 @@ namespace DnsToolkit.Net.Spf
 					break;
 
 				case SpfMechanismType.Exists:
-					if (++state.DnsLookupCount > DnsLookupLimit)
+					if (++state.DnsLookupCount > EffectiveDnsLookupLimit)
 						return SpfQualifier.PermError;
 
 					if (String.IsNullOrEmpty(mechanism.Domain))
@@ -437,7 +539,7 @@ namespace DnsToolkit.Net.Spf
 					break;
 
 				case SpfMechanismType.Include:
-					if (++state.DnsLookupCount > DnsLookupLimit)
+					if (++state.DnsLookupCount > EffectiveDnsLookupLimit)
 						return SpfQualifier.PermError;
 
 					if (String.IsNullOrEmpty(mechanism.Domain))
@@ -447,10 +549,13 @@ namespace DnsToolkit.Net.Spf
 					if (includeMechanismDomain == null)
 						return includeError;
 
-					if (includeMechanismDomain.Equals(domain))
+					if (includeMechanismDomain.Equals(domain) || (state.NestingDepth >= _maximumNestingDepth))
 						return SpfQualifier.PermError;
 
+					state.NestingDepth++;
 					var includeResult = await CheckHostInternalAsync(ip, includeMechanismDomain, sender, false, state, token).ConfigureAwait(false);
+					state.NestingDepth--;
+
 					switch (includeResult.Result)
 					{
 						case SpfQualifier.Pass:
@@ -547,6 +652,9 @@ namespace DnsToolkit.Net.Spf
 			}
 			catch
 			{
+				// a cancelled query says nothing about the name, unlike a failed one
+				token.ThrowIfCancellationRequested();
+
 				return new DnsResolveResult<TRecord>(ReturnCode.ServerFailure, null);
 			}
 		}
@@ -593,7 +701,7 @@ namespace DnsToolkit.Net.Spf
 			Match match = _parseMacroRegex.Match(pattern);
 			if (!match.Success)
 			{
-				return (pattern, SpfQualifier.None);
+				return (pattern.IndexOf('%') < 0) ? (pattern, SpfQualifier.None) : (null, SpfQualifier.PermError);
 			}
 
 			StringBuilder sb = new StringBuilder();
@@ -602,6 +710,10 @@ namespace DnsToolkit.Net.Spf
 			{
 				if (match.Index != pos)
 				{
+					// a percent sign, which is not part of a macro, is a syntax error (RFC 7208, section 7.3)
+					if (pattern.IndexOf('%', pos, match.Index - pos) >= 0)
+						return (null, SpfQualifier.PermError);
+
 					sb.Append(pattern, pos, match.Index - pos);
 				}
 
@@ -617,6 +729,9 @@ namespace DnsToolkit.Net.Spf
 
 			if (pos < pattern.Length)
 			{
+				if (pattern.IndexOf('%', pos) >= 0)
+					return (null, SpfQualifier.PermError);
+
 				sb.Append(pattern, pos, pattern.Length - pos);
 			}
 
@@ -668,7 +783,7 @@ namespace DnsToolkit.Net.Spf
 							break;
 						case "p":
 							// the lookup is counted like a term (RFC 7208, section 4.6.4), but not for an explanation, as the result is already known
-							if ((target == MacroTarget.TermName) && (state.ValidatedNames == null) && (++state.DnsLookupCount > DnsLookupLimit))
+							if ((target == MacroTarget.TermName) && (state.ValidatedNames == null) && (++state.DnsLookupCount > EffectiveDnsLookupLimit))
 								return (null, SpfQualifier.PermError);
 
 							state.ValidatedNames ??= await GetValidatedNamesAsync(ip, token).ConfigureAwait(false);
