@@ -101,10 +101,7 @@ namespace DnsToolkit.Net.Dns
 			throw new NotSupportedException();
 		}
 
-		void IDisposable.Dispose()
-		{
-			GC.SuppressFinalize(this);
-		}
+		void IDisposable.Dispose() { }
 
 		private class UdpClientConnection : IClientConnection
 		{

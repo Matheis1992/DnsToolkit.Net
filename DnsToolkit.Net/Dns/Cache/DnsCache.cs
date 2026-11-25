@@ -48,7 +48,7 @@ namespace DnsToolkit.Net.Dns
 	///   are removed regularly and the entries used least recently are removed first if the limit is reached.
 	///   An entry is only replaced by records, which are at least as trustworthy, until it expires (RFC 2181, section 5.4.1).
 	/// </summary>
-	internal class DnsCache
+	internal class DnsCache : IDisposable
 	{
 		/// <summary>
 		///   The default maximum number of cached records. An entry counts as its number of records plus one,
@@ -127,6 +127,8 @@ namespace DnsToolkit.Net.Dns
 		// serializes the check of the existing entry and its replacement
 		private readonly object _addLock = new();
 
+		private volatile bool _isDisposed;
+
 		public DnsCache()
 			: this(DEFAULT_SIZE_LIMIT, _defaultExpirationScanFrequency) { }
 
@@ -151,6 +153,35 @@ namespace DnsToolkit.Net.Dns
 		/// </summary>
 		internal int Count => _cache.Count;
 
+		internal bool IsDisposed => _isDisposed;
+
+		/// <summary>
+		///   Removes all entries
+		/// </summary>
+		public void Clear()
+		{
+			lock (_addLock)
+			{
+				if (!_isDisposed)
+					_cache.Clear();
+			}
+		}
+
+		/// <summary>
+		///   Disposes the cache. Queries, which still use it, do not fail: it is empty and adds no entries anymore.
+		/// </summary>
+		public void Dispose()
+		{
+			lock (_addLock)
+			{
+				if (_isDisposed)
+					return;
+
+				_isDisposed = true;
+				_cache.Dispose();
+			}
+		}
+
 		public void Add<TRecord>(DomainName name, RecordType recordType, RecordClass recordClass, IEnumerable<TRecord> records, DnsSecValidationResult validationResult, int timeToLive, DnsCacheTrust trust = DnsCacheTrust.Answer)
 			where TRecord : DnsRecordBase
 		{
@@ -168,6 +199,9 @@ namespace DnsToolkit.Net.Dns
 
 			lock (_addLock)
 			{
+				if (_isDisposed)
+					return;
+
 				// a valid entry is kept, until it expires, if the new records are less trustworthy
 				if (_cache.TryGetValue(key, out CacheValue? existing) && (existing!.ExpireDateUtc > utcNow) && !existing.IsReplacedBy(trust, records.ValidationResult))
 					return;
@@ -208,7 +242,7 @@ namespace DnsToolkit.Net.Dns
 			CacheKey key = new CacheKey(name, recordType, recordClass);
 			DateTime utcNow = _clock.UtcNow.UtcDateTime;
 
-			if (_cache.TryGetValue(key, out CacheValue? cacheValue) && (cacheValue!.ExpireDateUtc > utcNow))
+			if (TryGetValue(key, out CacheValue? cacheValue) && (cacheValue!.ExpireDateUtc > utcNow))
 			{
 				int ttl = (int) (cacheValue.ExpireDateUtc - utcNow).TotalSeconds;
 
@@ -231,6 +265,19 @@ namespace DnsToolkit.Net.Dns
 
 			records = null;
 			return false;
+		}
+
+		private bool TryGetValue(CacheKey key, out CacheValue? cacheValue)
+		{
+			try
+			{
+				return _cache.TryGetValue(key, out cacheValue);
+			}
+			catch (ObjectDisposedException)
+			{
+				cacheValue = null;
+				return false;
+			}
 		}
 	}
 }
