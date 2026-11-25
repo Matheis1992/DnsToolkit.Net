@@ -689,6 +689,38 @@ public class SpfTests
 		Assert.Equal(expected, await CheckAsync(new SpfValidator { DnsResolver = resolver }, "192.0.2.1", sender));
 	}
 
+	[Theory]
+	[InlineData(9)]
+	[InlineData(10)]
+	public async Task PtrMacro_InExplanationNameIsNotLimited(int termCount)
+	{
+		// the result is already known, so it does not depend on the lookups of the terms
+		var terms = Enumerable.Range(1, termCount).Select(i => $"a:a{i}.test");
+		var resolver = new SimulatedResolver()
+			.Add(new TxtRecord(_domain, 60, $"v=spf1 {String.Join(" ", terms)} -all exp=%{{p}}.exp.test"))
+			.Add(new TxtRecord(DomainName.Parse("unknown.exp.test"), 60, "why"));
+
+		var result = await new SpfValidator { DnsResolver = resolver }.CheckHostAsync(IPAddress.Parse("192.0.2.1"), _domain, "user@example.test", true);
+
+		Assert.Equal(SpfQualifier.Fail, result.Result);
+		Assert.Equal("why", result.Explanation);
+	}
+
+	[Theory]
+	[InlineData("x%{o}", "user@bücher.test", "xxn--bcher-kva.test")]
+	[InlineData("_x-%{o}", "user@bücher.test", "_x-xn--bcher-kva.test")]
+	[InlineData("%{o1r}", "user@bücher.test", "xn--bcher-kva")]
+	[InlineData("x%{o}", "user@example.test", "xexample.test")]
+	public async Task InternationalSenderDomain_IsConvertedBeforeItIsInserted(string pattern, string sender, string name)
+	{
+		// RFC 8616 section 4
+		var resolver = new SimulatedResolver()
+			.Add(new TxtRecord(_domain, 60, $"v=spf1 exists:{pattern}._spf.example.test -all"))
+			.Add(new ARecord(DomainName.Parse(name + "._spf.example.test"), 60, IPAddress.Parse("127.0.0.2")));
+
+		Assert.Equal(SpfQualifier.Pass, await CheckAsync(new SpfValidator { DnsResolver = resolver }, "192.0.2.1", sender));
+	}
+
 	private static DnsRecordBase CreateAddressRecord(DomainName name, string address)
 	{
 		var ip = IPAddress.Parse(address);

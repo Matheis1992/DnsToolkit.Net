@@ -47,6 +47,14 @@ namespace DnsToolkit.Net.Spf
 			internal List<DomainName>? ValidatedNames { get; set; }
 		}
 
+		// what macros are expanded for
+		private enum MacroTarget
+		{
+			TermName,
+			ExplanationName,
+			ExplanationText,
+		}
+
 		private const int _maximumNameLength = 253;
 
 		// ReSharper disable once StaticMemberInGenericType
@@ -234,7 +242,7 @@ namespace DnsToolkit.Net.Spf
 				SpfModifier? expModifier = record?.Terms?.OfType<SpfModifier>().FirstOrDefault(m => m.Type == SpfModifierType.Exp);
 				if (expModifier != null)
 				{
-					DomainName? target = (await ExpandDomainAsync(expModifier.Domain, ip, domain, sender, state, token).ConfigureAwait(false)).Name;
+					DomainName? target = (await ExpandDomainAsync(expModifier.Domain, ip, domain, sender, state, token, MacroTarget.ExplanationName).ConfigureAwait(false)).Name;
 
 					if ((target == null) || target.IsRoot)
 					{
@@ -248,7 +256,7 @@ namespace DnsToolkit.Net.Spf
 							TxtRecord? txtRecord = dnsResult.Records?.FirstOrDefault();
 							if (txtRecord != null)
 							{
-								result.Explanation = (await ExpandMacroAsync(txtRecord.TextData, ip, domain, sender, state, false, token).ConfigureAwait(false)).Text ?? String.Empty;
+								result.Explanation = (await ExpandMacroAsync(txtRecord.TextData, ip, domain, sender, state, MacroTarget.ExplanationText, token).ConfigureAwait(false)).Text ?? String.Empty;
 							}
 						}
 					}
@@ -540,9 +548,9 @@ namespace DnsToolkit.Net.Spf
 			return await ExpandDomainAsync(mechanism.Domain!, ip, domain, sender, state, token).ConfigureAwait(false);
 		}
 
-		private async Task<(DomainName? Name, SpfQualifier Error)> ExpandDomainAsync(string pattern, IPAddress ip, DomainName domain, string sender, State state, CancellationToken token)
+		private async Task<(DomainName? Name, SpfQualifier Error)> ExpandDomainAsync(string pattern, IPAddress ip, DomainName domain, string sender, State state, CancellationToken token, MacroTarget target = MacroTarget.TermName)
 		{
-			(string? expanded, SpfQualifier error) = await ExpandMacroAsync(pattern, ip, domain, sender, state, true, token).ConfigureAwait(false);
+			(string? expanded, SpfQualifier error) = await ExpandMacroAsync(pattern, ip, domain, sender, state, target, token).ConfigureAwait(false);
 
 			if (expanded == null)
 				return (null, error);
@@ -564,7 +572,7 @@ namespace DnsToolkit.Net.Spf
 			return DomainName.TryParse(expanded, out DomainName? name) ? (name, SpfQualifier.None) : (null, SpfQualifier.None);
 		}
 
-		private async Task<(string? Text, SpfQualifier Error)> ExpandMacroAsync(string pattern, IPAddress ip, DomainName domain, string sender, State state, bool isDomain, CancellationToken token)
+		private async Task<(string? Text, SpfQualifier Error)> ExpandMacroAsync(string pattern, IPAddress ip, DomainName domain, string sender, State state, MacroTarget target, CancellationToken token)
 		{
 			if (String.IsNullOrEmpty(pattern))
 				return (String.Empty, SpfQualifier.None);
@@ -586,7 +594,7 @@ namespace DnsToolkit.Net.Spf
 
 				pos = match.Index + match.Length;
 
-				(string? expanded, SpfQualifier error) = await ExpandMacroAsync(match, ip, domain, sender, state, isDomain, token).ConfigureAwait(false);
+				(string? expanded, SpfQualifier error) = await ExpandMacroAsync(match, ip, domain, sender, state, target, token).ConfigureAwait(false);
 				if (expanded == null)
 					return (null, error);
 
@@ -602,7 +610,7 @@ namespace DnsToolkit.Net.Spf
 			return (sb.ToString(), SpfQualifier.None);
 		}
 
-		private async Task<(string? Text, SpfQualifier Error)> ExpandMacroAsync(Match pattern, IPAddress ip, DomainName domain, string sender, State state, bool isDomain, CancellationToken token)
+		private async Task<(string? Text, SpfQualifier Error)> ExpandMacroAsync(Match pattern, IPAddress ip, DomainName domain, string sender, State state, MacroTarget target, CancellationToken token)
 		{
 			switch (pattern.Value)
 			{
@@ -618,13 +626,13 @@ namespace DnsToolkit.Net.Spf
 					switch (pattern.Groups["letter"].Value)
 					{
 						case "s":
-							if (isDomain && !IsLocalPartAscii(sender))
+							if ((target != MacroTarget.ExplanationText) && !IsLocalPartAscii(sender))
 								return (null, SpfQualifier.None);
 
-							letter = isDomain ? ToALabels(sender) : sender;
+							letter = (target == MacroTarget.ExplanationText) ? sender : ToALabels(sender);
 							break;
 						case "l":
-							if (isDomain && !IsLocalPartAscii(sender))
+							if ((target != MacroTarget.ExplanationText) && !IsLocalPartAscii(sender))
 								return (null, SpfQualifier.None);
 
 							// no boundary check needed, sender is validated on start of CheckHost
@@ -632,7 +640,7 @@ namespace DnsToolkit.Net.Spf
 							break;
 						case "o":
 							// no boundary check needed, sender is validated on start of CheckHost
-							letter = sender.Split('@')[1];
+							letter = ((target == MacroTarget.ExplanationText) ? sender : ToALabels(sender)).Split('@')[1];
 							break;
 						case "d":
 							letter = domain.ToString(false);
@@ -644,8 +652,8 @@ namespace DnsToolkit.Net.Spf
 								: String.Join(".", ip.GetAddressBytes().Select(b => b.ToString()));
 							break;
 						case "p":
-							// counted like a term (RFC 7208, section 4.6.4), but not for the text of an explanation, as the result is already known
-							if (isDomain && (++state.DnsLookupCount > DnsLookupLimit))
+							// counted like a term (RFC 7208, section 4.6.4), but not for an explanation, as the result is already known
+							if ((target == MacroTarget.TermName) && (++state.DnsLookupCount > DnsLookupLimit))
 								return (null, SpfQualifier.PermError);
 
 							letter = "unknown";
