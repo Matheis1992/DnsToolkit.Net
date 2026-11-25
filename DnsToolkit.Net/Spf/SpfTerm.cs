@@ -30,8 +30,9 @@ namespace DnsToolkit.Net.Spf
 	/// </summary>
 	public abstract class SpfTerm
 	{
-		private static readonly Regex _parseMechanismRegex = new Regex(@"^(\s)*(?<qualifier>[~+?-]?)(?<type>[a-z0-9]+)(:(?<domain>[^/]+))?(/(?<prefix>[0-9]+))?(//?(?<prefix6>[0-9]+))?(\s)*$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
-		private static readonly Regex _parseModifierRegex = new Regex(@"^(\s)*(?<type>[a-z]+)=(?<domain>[^\s]+)(\s)*$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+		// a slash within a macro is a delimiter and not the start of a prefix length
+		private static readonly Regex _parseMechanismRegex = new Regex(@"^(\s)*(?<qualifier>[~+?-]?)(?<type>[a-z0-9]+)(:(?<domain>(?>(%%|%\{[a-z][0-9]*r?[\.\-+,/_=]*\}|[^/])+)))?(/(?<prefix>[0-9]+))?(//?(?<prefix6>[0-9]+))?(\s)*$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+		private static readonly Regex _parseModifierRegex = new Regex(@"^(\s)*(?<type>[a-z][a-z0-9\-_\.]*)=(?<domain>[^\s]*)(\s)*$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
 		internal static bool TryParse(string s, out SpfTerm? value)
 		{
@@ -104,9 +105,17 @@ namespace DnsToolkit.Net.Spf
 			match = _parseModifierRegex.Match(s);
 			if (match.Success)
 			{
-				value = new SpfModifier(
-					EnumHelper<SpfModifierType>.TryParse(match.Groups["type"].Value, true, out SpfModifierType t) ? t : SpfModifierType.Unknown,
-					match.Groups["domain"].Value);
+				SpfModifierType type = EnumHelper<SpfModifierType>.TryParse(match.Groups["type"].Value, true, out SpfModifierType t) ? t : SpfModifierType.Unknown;
+				string domain = match.Groups["domain"].Value;
+
+				// only unknown modifiers may be empty
+				if ((type != SpfModifierType.Unknown) && String.IsNullOrEmpty(domain))
+				{
+					value = null;
+					return false;
+				}
+
+				value = new SpfModifier(type, domain);
 				return true;
 			}
 			#endregion

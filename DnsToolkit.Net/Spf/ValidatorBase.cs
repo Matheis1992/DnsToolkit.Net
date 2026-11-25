@@ -21,7 +21,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
-using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -58,7 +57,7 @@ namespace DnsToolkit.Net.Spf
 		private const int _maximumNameLength = 253;
 
 		// ReSharper disable once StaticMemberInGenericType
-		private static readonly Regex _parseMacroRegex = new Regex(@"(%%|%_|%-|%\{(?<letter>[slodiphcrtv])(?<count>\d*)(?<reverse>r?)(?<delimiter>[\.\-+,/=]*)})", RegexOptions.Compiled);
+		private static readonly Regex _parseMacroRegex = new Regex(@"(%%|%_|%-|%\{(?<letter>[slodiphcrtvSLODIPHCRTV])(?<count>\d*)(?<reverse>[rR]?)(?<delimiter>[\.\-+,/_=]*)})", RegexOptions.Compiled);
 
 		/// <summary>
 		///   DnsResolver which is used for DNS lookups
@@ -73,7 +72,7 @@ namespace DnsToolkit.Net.Spf
 
 		/// <summary>
 		///   IP address of the computer validating the record
-		///   <para>Default is the first IP the computer</para>
+		///   <para>Has no effect anymore, as the macro %{c} is the address of the client (RFC 7208, section 7.2)</para>
 		/// </summary>
 		public IPAddress? LocalIP { get; set; }
 
@@ -125,7 +124,9 @@ namespace DnsToolkit.Net.Spf
 		[Obsolete("Blocks the calling thread while waiting for the DNS responses. Use CheckHostAsync instead.")]
 		public ValidationResult CheckHost(IPAddress ip, string domain, string sender, bool expandExplanation = false)
 		{
-			return CheckHost(ip, DomainName.Parse(domain), sender, expandExplanation);
+			// a malformed domain results in None (RFC 7208, section 4.3)
+			DomainName.TryParse(domain, out DomainName? name);
+			return CheckHostInternalAsync(ip, name, sender, expandExplanation, new State(), default).GetAwaiter().GetResult();
 		}
 
 		/// <summary>
@@ -153,7 +154,9 @@ namespace DnsToolkit.Net.Spf
 		/// <returns> The result of the evaluation </returns>
 		public Task<ValidationResult> CheckHostAsync(IPAddress ip, string domain, string sender, bool expandExplanation = false, CancellationToken token = default(CancellationToken))
 		{
-			return CheckHostAsync(ip, DomainName.Parse(domain), sender, expandExplanation, token);
+			// a malformed domain results in None (RFC 7208, section 4.3)
+			DomainName.TryParse(domain, out DomainName? name);
+			return CheckHostInternalAsync(ip, name, sender, expandExplanation, new State(), token);
 		}
 
 		protected class LoadRecordResult
@@ -181,6 +184,10 @@ namespace DnsToolkit.Net.Spf
 			else if (!sender.Contains('@'))
 			{
 				sender = "postmaster@" + sender;
+			}
+			else if (sender[0] == '@')
+			{
+				sender = "postmaster" + sender;
 			}
 
 			LoadRecordResult loadResult = await LoadRecordsAsync(domain, token).ConfigureAwait(false);
@@ -253,10 +260,15 @@ namespace DnsToolkit.Net.Spf
 						DnsResolveResult<TxtRecord> dnsResult = await ResolveDnsAsync<TxtRecord>(target, RecordType.Txt, token).ConfigureAwait(false);
 						if ((dnsResult != null) && (dnsResult.ReturnCode == ReturnCode.NoError))
 						{
-							TxtRecord? txtRecord = dnsResult.Records?.FirstOrDefault();
-							if (txtRecord != null)
+							// more than one record or a text, which is not ASCII, gives no explanation (RFC 7208, section 6.2)
+							if (dnsResult.Records?.Count == 1)
 							{
-								result.Explanation = (await ExpandMacroAsync(txtRecord.TextData, ip, domain, sender, state, MacroTarget.ExplanationText, token).ConfigureAwait(false)).Text ?? String.Empty;
+								string? explanation = (await ExpandMacroAsync(dnsResult.Records[0].TextData, ip, domain, sender, state, MacroTarget.ExplanationText, token).ConfigureAwait(false)).Text;
+								result.Explanation = (explanation != null) && explanation.All(c => c <= 127) ? explanation : String.Empty;
+							}
+							else
+							{
+								result.Explanation = String.Empty;
 							}
 						}
 					}
@@ -375,8 +387,9 @@ namespace DnsToolkit.Net.Spf
 						return ptrError;
 
 					DnsResolveResult<PtrRecord> dnsPtrResult = await ResolveDnsAsync<PtrRecord>(ip.GetReverseLookupDomain(), RecordType.Ptr, token).ConfigureAwait(false);
+					// the mechanism does not match, if the lookup fails (RFC 7208, section 5.5)
 					if ((dnsPtrResult == null) || ((dnsPtrResult.ReturnCode != ReturnCode.NoError) && (dnsPtrResult.ReturnCode != ReturnCode.NxDomain)))
-						return SpfQualifier.TempError;
+						return SpfQualifier.None;
 
 					if (dnsPtrResult.Records!.Count == 0 && ++state.VoidLookupCount > VoidLookupLimit)
 						return SpfQualifier.PermError;
@@ -623,7 +636,8 @@ namespace DnsToolkit.Net.Spf
 
 				default:
 					string letter;
-					switch (pattern.Groups["letter"].Value)
+					string macro = pattern.Groups["letter"].Value;
+					switch (macro.ToLowerInvariant())
 					{
 						case "s":
 							if ((target != MacroTarget.ExplanationText) && !IsLocalPartAscii(sender))
@@ -636,11 +650,12 @@ namespace DnsToolkit.Net.Spf
 								return (null, SpfQualifier.None);
 
 							// no boundary check needed, sender is validated on start of CheckHost
-							letter = sender.Split('@')[0];
+							letter = sender.Substring(0, sender.LastIndexOf('@'));
 							break;
 						case "o":
 							// no boundary check needed, sender is validated on start of CheckHost
-							letter = ((target == MacroTarget.ExplanationText) ? sender : ToALabels(sender)).Split('@')[1];
+							string convertedSender = (target == MacroTarget.ExplanationText) ? sender : ToALabels(sender);
+							letter = convertedSender.Substring(convertedSender.LastIndexOf('@') + 1);
 							break;
 						case "d":
 							letter = domain.ToString(false);
@@ -652,8 +667,8 @@ namespace DnsToolkit.Net.Spf
 								: String.Join(".", ip.GetAddressBytes().Select(b => b.ToString()));
 							break;
 						case "p":
-							// counted like a term (RFC 7208, section 4.6.4), but not for an explanation, as the result is already known
-							if ((target == MacroTarget.TermName) && (++state.DnsLookupCount > DnsLookupLimit))
+							// the lookup is counted like a term (RFC 7208, section 4.6.4), but not for an explanation, as the result is already known
+							if ((target == MacroTarget.TermName) && (state.ValidatedNames == null) && (++state.DnsLookupCount > DnsLookupLimit))
 								return (null, SpfQualifier.PermError);
 
 							state.ValidatedNames ??= await GetValidatedNamesAsync(ip, token).ConfigureAwait(false);
@@ -672,15 +687,7 @@ namespace DnsToolkit.Net.Spf
 							letter = HeloDomain?.ToString(false) ?? "unknown";
 							break;
 						case "c":
-							IPAddress address =
-								LocalIP
-								?? NetworkInterface.GetAllNetworkInterfaces()
-									.Where(n => (n.OperationalStatus == OperationalStatus.Up) && (n.NetworkInterfaceType != NetworkInterfaceType.Loopback))
-									.SelectMany(n => n.GetIPProperties().UnicastAddresses)
-									.Select(u => u.Address)
-									.FirstOrDefault(a => a.AddressFamily == ip.AddressFamily)
-								?? ((ip.AddressFamily == AddressFamily.InterNetwork) ? IPAddress.Loopback : IPAddress.IPv6Loopback);
-							letter = address.ToString();
+							letter = ip.ToString();
 							break;
 						case "r":
 							letter = LocalDomain?.ToString(false) ?? System.Net.Dns.GetHostName();
@@ -692,9 +699,11 @@ namespace DnsToolkit.Net.Spf
 							return (null, SpfQualifier.PermError);
 					}
 
+					bool isEscaped = Char.IsUpper(macro[0]);
+
 					// only letter
 					if (pattern.Value.Length == 4)
-						return (letter, SpfQualifier.None);
+						return (isEscaped ? EscapeUrl(letter) : letter, SpfQualifier.None);
 
 					char[] delimiters = pattern.Groups["delimiter"].Value.ToCharArray();
 					if (delimiters.Length == 0)
@@ -702,7 +711,7 @@ namespace DnsToolkit.Net.Spf
 
 					string[] parts = letter.Split(delimiters);
 
-					if (pattern.Groups["reverse"].Value == "r")
+					if (pattern.Groups["reverse"].Length > 0)
 						parts = Enumerable.Reverse(parts).ToArray();
 
 					int count = Int32.MaxValue;
@@ -717,7 +726,8 @@ namespace DnsToolkit.Net.Spf
 
 					count = Math.Min(count, parts.Length);
 
-					return (String.Join(".", parts, (parts.Length - count), count), SpfQualifier.None);
+					string joined = String.Join(".", parts, (parts.Length - count), count);
+					return (isEscaped ? EscapeUrl(joined) : joined, SpfQualifier.None);
 			}
 		}
 
@@ -737,6 +747,24 @@ namespace DnsToolkit.Net.Spf
 			}
 
 			return names;
+		}
+
+		// escapes all characters, which are not unreserved (RFC 7208, section 7.3)
+		private static string EscapeUrl(string s)
+		{
+			var sb = new StringBuilder();
+
+			foreach (byte b in Encoding.UTF8.GetBytes(s))
+			{
+				char c = (char) b;
+
+				if (((c >= 'a') && (c <= 'z')) || ((c >= 'A') && (c <= 'Z')) || ((c >= '0') && (c <= '9')) || (c == '-') || (c == '.') || (c == '_') || (c == '~'))
+					sb.Append(c);
+				else
+					sb.Append('%').Append(b.ToString("X2"));
+			}
+
+			return sb.ToString();
 		}
 
 		// terms with a local part, which is not ASCII, do not match (RFC 8616, section 4)
