@@ -609,9 +609,9 @@ namespace DnsToolkit.Net.Spf
 				case "%%":
 					return ("%", SpfQualifier.None);
 				case "%_":
-					return ("_", SpfQualifier.None);
+					return (" ", SpfQualifier.None);
 				case "%-":
-					return ("-", SpfQualifier.None);
+					return ("%20", SpfQualifier.None);
 
 				default:
 					string letter;
@@ -648,26 +648,14 @@ namespace DnsToolkit.Net.Spf
 							if (isDomain && (++state.DnsLookupCount > DnsLookupLimit))
 								return (null, SpfQualifier.PermError);
 
-							letter = "unknown";
-
 							state.ValidatedNames ??= await GetValidatedNamesAsync(ip, token).ConfigureAwait(false);
 
-							foreach (DomainName validatedName in state.ValidatedNames)
-							{
-								if (letter == "unknown" || validatedName.IsSubDomainOf(domain))
-								{
-									// use value, if first record or subdomain
-									// but evaluate the other records
-									letter = validatedName.ToString(false);
-								}
-								else if (validatedName.Equals(domain))
-								{
-									// ptr equal domain --> best match, use it
-									letter = validatedName.ToString(false);
-									break;
-								}
-							}
+							// the domain itself, otherwise a subdomain, otherwise any name (RFC 7208, section 7.3)
+							DomainName? ptrName = state.ValidatedNames.FirstOrDefault(n => n.Equals(domain))
+							                      ?? state.ValidatedNames.FirstOrDefault(n => n.IsSubDomainOf(domain))
+							                      ?? state.ValidatedNames.FirstOrDefault();
 
+							letter = ptrName?.ToString(false) ?? "unknown";
 							break;
 						case "v":
 							letter = (ip.AddressFamily == AddressFamily.InterNetworkV6) ? "ip6" : "in-addr";
@@ -690,7 +678,7 @@ namespace DnsToolkit.Net.Spf
 							letter = LocalDomain?.ToString(false) ?? System.Net.Dns.GetHostName();
 							break;
 						case "t":
-							letter = ((int) (new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc) - DateTime.Now).TotalSeconds).ToString();
+							letter = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
 							break;
 						default:
 							return (null, SpfQualifier.PermError);

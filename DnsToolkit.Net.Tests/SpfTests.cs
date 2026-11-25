@@ -248,6 +248,59 @@ public class SpfTests
 		Assert.Equal(SpfQualifier.Pass, await CheckAsync(resolver, ip));
 	}
 
+	[Theory]
+	[InlineData("example.test", "example.test", "mail.example.test")]
+	[InlineData("example.test", "mail.example.test", "example.test")]
+	[InlineData("example.test", "host.other.test", "mail.example.test", "example.test")]
+	[InlineData("mail.example.test", "host.other.test", "mail.example.test")]
+	[InlineData("mail.example.test", "mail.example.test", "host.other.test")]
+	[InlineData("host.other.test", "host.other.test", "host.second.test")]
+	public async Task PtrMacro_PrefersTheDomainThenASubdomain(string expectedName, params string[] names)
+	{
+		// RFC 7208 section 7.3
+		var resolver = new SimulatedResolver()
+			.Add(new TxtRecord(_domain, 60, "v=spf1 exists:%{p}._spf.example.test -all"))
+			.Add(new ARecord(DomainName.Parse(expectedName + "._spf.example.test"), 60, IPAddress.Parse("127.0.0.2")));
+		foreach (var name in names)
+		{
+			resolver.Add(new PtrRecord(IPAddress.Parse("192.0.2.1").GetReverseLookupDomain(), 60, DomainName.Parse(name)));
+			resolver.Add(CreateAddressRecord(DomainName.Parse(name), "192.0.2.1"));
+		}
+
+		Assert.Equal(SpfQualifier.Pass, await CheckAsync(resolver, "192.0.2.1"));
+	}
+
+	[Theory]
+	[InlineData("not%_allowed", "not allowed")]
+	[InlineData("http://example.test/why?a=x%-y", "http://example.test/why?a=x%20y")]
+	[InlineData("100%%", "100%")]
+	[InlineData("%%{d}", "%{d}")]
+	public async Task Escapes_AreExpandedInExplanation(string text, string expected)
+	{
+		// RFC 7208 section 7.1
+		Assert.Equal(expected, await ExplainAsync(text));
+	}
+
+	[Fact]
+	public async Task TimestampMacro_ExpandsToUnixTime()
+	{
+		var before = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+		var timestamp = Int64.Parse(await ExplainAsync("%{t}"));
+		var after = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+		Assert.InRange(timestamp, before, after);
+	}
+
+	private static async Task<string> ExplainAsync(string text)
+	{
+		var resolver = new SimulatedResolver()
+			.Add(new TxtRecord(_domain, 60, "v=spf1 -all exp=exp.example.test"))
+			.Add(new TxtRecord(DomainName.Parse("exp.example.test"), 60, text));
+
+		var result = await new SpfValidator { DnsResolver = resolver }.CheckHostAsync(IPAddress.Parse("192.0.2.1"), _domain, "user@example.test", true);
+		return result.Explanation ?? String.Empty;
+	}
+
 	[Fact]
 	public async Task IncludeMechanism_UsesResultOfIncludedDomain()
 	{
