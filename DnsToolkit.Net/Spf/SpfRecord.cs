@@ -75,7 +75,7 @@ namespace DnsToolkit.Net.Spf
 			// The version is followed by a space or the end of the record (RFC 7208 section 4.5),
 			// so "v=spf1" alone is a valid record without mechanisms, which results in neutral
 			return !String.IsNullOrEmpty(s)
-			       && (s.Equals("v=spf1", StringComparison.Ordinal) || s.StartsWith("v=spf1 ", StringComparison.Ordinal));
+			       && (s.Equals("v=spf1", StringComparison.OrdinalIgnoreCase) || s.StartsWith("v=spf1 ", StringComparison.OrdinalIgnoreCase));
 		}
 
 		/// <summary>

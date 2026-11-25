@@ -248,6 +248,59 @@ public class SpfTests
 		Assert.Equal(SpfQualifier.Pass, await CheckAsync(resolver, ip));
 	}
 
+	[Theory]
+	[InlineData("example.test", "example.test", "mail.example.test")]
+	[InlineData("example.test", "mail.example.test", "example.test")]
+	[InlineData("example.test", "host.other.test", "mail.example.test", "example.test")]
+	[InlineData("mail.example.test", "host.other.test", "mail.example.test")]
+	[InlineData("mail.example.test", "mail.example.test", "host.other.test")]
+	[InlineData("host.other.test", "host.other.test", "host.second.test")]
+	public async Task PtrMacro_PrefersTheDomainThenASubdomain(string expectedName, params string[] names)
+	{
+		// RFC 7208 section 7.3
+		var resolver = new SimulatedResolver()
+			.Add(new TxtRecord(_domain, 60, "v=spf1 exists:%{p}._spf.example.test -all"))
+			.Add(new ARecord(DomainName.Parse(expectedName + "._spf.example.test"), 60, IPAddress.Parse("127.0.0.2")));
+		foreach (var name in names)
+		{
+			resolver.Add(new PtrRecord(IPAddress.Parse("192.0.2.1").GetReverseLookupDomain(), 60, DomainName.Parse(name)));
+			resolver.Add(CreateAddressRecord(DomainName.Parse(name), "192.0.2.1"));
+		}
+
+		Assert.Equal(SpfQualifier.Pass, await CheckAsync(resolver, "192.0.2.1"));
+	}
+
+	[Theory]
+	[InlineData("not%_allowed", "not allowed")]
+	[InlineData("http://example.test/why?a=x%-y", "http://example.test/why?a=x%20y")]
+	[InlineData("100%%", "100%")]
+	[InlineData("%%{d}", "%{d}")]
+	public async Task Escapes_AreExpandedInExplanation(string text, string expected)
+	{
+		// RFC 7208 section 7.1
+		Assert.Equal(expected, await ExplainAsync(text));
+	}
+
+	[Fact]
+	public async Task TimestampMacro_ExpandsToUnixTime()
+	{
+		var before = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+		var timestamp = Int64.Parse(await ExplainAsync("%{t}"));
+		var after = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+		Assert.InRange(timestamp, before, after);
+	}
+
+	private static async Task<string> ExplainAsync(string text)
+	{
+		var resolver = new SimulatedResolver()
+			.Add(new TxtRecord(_domain, 60, "v=spf1 -all exp=exp.example.test"))
+			.Add(new TxtRecord(DomainName.Parse("exp.example.test"), 60, text));
+
+		var result = await new SpfValidator { DnsResolver = resolver }.CheckHostAsync(IPAddress.Parse("192.0.2.1"), _domain, "user@example.test", true);
+		return result.Explanation ?? String.Empty;
+	}
+
 	[Fact]
 	public async Task IncludeMechanism_UsesResultOfIncludedDomain()
 	{
@@ -633,12 +686,12 @@ public class SpfTests
 	}
 
 	[Theory]
-	[InlineData(5, SpfQualifier.Pass)]
-	[InlineData(6, SpfQualifier.PermError)]
-	public async Task PtrMacro_CountsAsLookup(int termCount, SpfQualifier expected)
+	[InlineData(9, SpfQualifier.Pass)]
+	[InlineData(10, SpfQualifier.PermError)]
+	public async Task PtrMacro_CountsAsOneLookup(int termCount, SpfQualifier expected)
 	{
-		// two lookups for each term, only the last one matches
-		var terms = Enumerable.Range(1, termCount).Select(i => $"exists:%{{p}}.e{i}.test");
+		// one lookup for each term and one for the names of all macros, only the last term matches
+		var terms = Enumerable.Range(1, termCount).Select(i => i == termCount ? $"exists:%{{p}}.e{i}.test" : $"exists:%{{p}}.%{{p}}.e{i}.test");
 		var resolver = new SimulatedResolver()
 			.Add(new TxtRecord(_domain, 60, $"v=spf1 {String.Join(" ", terms)} -all"))
 			.Add(new PtrRecord(IPAddress.Parse("192.0.2.1").GetReverseLookupDomain(), 60, _domain))
@@ -646,6 +699,22 @@ public class SpfTests
 			.Add(new ARecord(DomainName.Parse($"example.test.e{termCount}.test"), 60, IPAddress.Parse("127.0.0.2")));
 
 		Assert.Equal(expected, await CheckAsync(resolver, "192.0.2.1"));
+	}
+
+	[Theory]
+	[InlineData("include:other.test", 2, SpfQualifier.PermError)]
+	[InlineData("include:other.test", 3, SpfQualifier.Pass)]
+	[InlineData("exists:%{p}.no.test include:other.test", 3, SpfQualifier.PermError)]
+	[InlineData("exists:%{p}.no.test include:other.test", 4, SpfQualifier.Pass)]
+	public async Task PtrMacro_IsCountedOnceForAllRecords(string terms, int limit, SpfQualifier expected)
+	{
+		// the include, its exists, the names and for some the exists before
+		var resolver = new SimulatedResolver()
+			.Add(new TxtRecord(_domain, 60, $"v=spf1 {terms} -all"))
+			.Add(new TxtRecord(DomainName.Parse("other.test"), 60, "v=spf1 exists:%{p}.yes.test -all"))
+			.Add(new ARecord(DomainName.Parse("unknown.yes.test"), 60, IPAddress.Parse("127.0.0.2")));
+
+		Assert.Equal(expected, await CheckAsync(new SpfValidator { DnsResolver = resolver, DnsLookupLimit = limit }, "192.0.2.1"));
 	}
 
 	[Fact]
@@ -719,6 +788,152 @@ public class SpfTests
 			.Add(new ARecord(DomainName.Parse(name + "._spf.example.test"), 60, IPAddress.Parse("127.0.0.2")));
 
 		Assert.Equal(SpfQualifier.Pass, await CheckAsync(new SpfValidator { DnsResolver = resolver }, "192.0.2.1", sender));
+	}
+
+	[Theory]
+	[InlineData("v=spf1 ptr ip4:192.0.2.1 -all", SpfQualifier.Pass)]
+	[InlineData("v=spf1 ptr -all", SpfQualifier.Fail)]
+	public async Task PtrMechanism_DoesNotMatchIfTheReverseLookupFails(string record, SpfQualifier expected)
+	{
+		// RFC 7208 section 5.5
+		var resolver = new SimulatedResolver()
+			.Add(new TxtRecord(_domain, 60, record))
+			.Fail(IPAddress.Parse("192.0.2.1").GetReverseLookupDomain());
+
+		Assert.Equal(expected, await CheckAsync(resolver, "192.0.2.1"));
+	}
+
+	[Theory]
+	[InlineData("%{l_}", "a_b@example.test", "a.b")]
+	[InlineData("%{l/}", "a/b@example.test", "a.b")]
+	[InlineData("%{l1r/_}", "a/b_c@example.test", "a")]
+	[InlineData("%{I}", "user@example.test", "192.0.2.1")]
+	[InlineData("%{IR}", "user@example.test", "1.2.0.192")]
+	[InlineData("%{iR}", "user@example.test", "1.2.0.192")]
+	[InlineData("%{D2}", "user@example.test", "example.test")]
+	[InlineData("%{L}", "a+b@example.test", "a%2Bb")]
+	[InlineData("%{S}", "a~b@example.test", "a~b%40example.test")]
+	[InlineData("%{l}", "\"a@b\"@example.test", "\"a@b\"")]
+	[InlineData("%{o}", "\"a@b\"@example.test", "example.test")]
+	[InlineData("%{l}", "@example.test", "postmaster")]
+	[InlineData("%{s}", "@example.test", "postmaster@example.test")]
+	public async Task Macros_AreExpanded(string macro, string sender, string expected)
+	{
+		// RFC 7208 sections 4.3 and 7.3
+		var resolver = new SimulatedResolver()
+			.Add(new TxtRecord(_domain, 60, $"v=spf1 exists:{macro}._spf.example.test -all"))
+			.Add(new ARecord(DomainName.Parse(expected + "._spf.example.test"), 60, IPAddress.Parse("127.0.0.2")));
+
+		Assert.Equal(SpfQualifier.Pass, await CheckAsync(new SpfValidator { DnsResolver = resolver }, "192.0.2.1", sender));
+	}
+
+	[Theory]
+	[InlineData("exists:%{l/}.e.test/24")]
+	[InlineData("exists:%%{l/}.e.test")]
+	public async Task SlashOutsideOfAMacro_StartsThePrefixLength(string term)
+	{
+		var resolver = new SimulatedResolver().Add(new TxtRecord(_domain, 60, $"v=spf1 {term} -all"));
+
+		Assert.Equal(SpfQualifier.PermError, await CheckAsync(resolver, "192.0.2.1"));
+	}
+
+	[Theory]
+	[InlineData("a:%{d/}/24//64", "192.0.2.99", SpfQualifier.Pass)]
+	[InlineData("a:%{d/}/24//64", "192.0.3.99", SpfQualifier.Fail)]
+	[InlineData("a:%{d/}/24//64", "2001:db8::99", SpfQualifier.Pass)]
+	public async Task MacroWithSlash_MayHaveAPrefixLength(string term, string ip, SpfQualifier expected)
+	{
+		Assert.Equal(expected, await CheckAsync(CreateDualStackResolver(term), ip));
+	}
+
+	[Fact]
+	public void ManyMacros_AreParsedFast()
+	{
+		var record = "v=spf1 exists:" + String.Concat(Enumerable.Repeat("%{l/}", 5000)) + "/x";
+		var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+		Assert.False(DnsToolkit.Net.Spf.SpfRecord.TryParse(record, out _));
+		Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(5));
+	}
+
+	[Theory]
+	[InlineData("192.0.2.1", "192.0.2.1")]
+	[InlineData("::ffff:192.0.2.1", "192.0.2.1")]
+	[InlineData("2001:db8::1", "2001:db8::1")]
+	public async Task ClientMacro_ExpandsToTheAddressOfTheClient(string ip, string expected)
+	{
+		// RFC 7208 section 7.2
+		var resolver = new SimulatedResolver()
+			.Add(new TxtRecord(_domain, 60, "v=spf1 -all exp=exp.example.test"))
+			.Add(new TxtRecord(DomainName.Parse("exp.example.test"), 60, "%{c}"));
+
+		var result = await new SpfValidator { DnsResolver = resolver, LocalIP = IPAddress.Parse("10.0.0.5") }.CheckHostAsync(IPAddress.Parse(ip), _domain, "user@example.test", true);
+
+		Assert.Equal(expected, result.Explanation);
+	}
+
+	[Theory]
+	[InlineData("a..b")]
+	[InlineData("")]
+	[InlineData(".")]
+	[InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.test")]
+	public async Task MalformedDomain_ResultsInNone(string domain)
+	{
+		// RFC 7208 section 4.3
+		var result = await new SpfValidator { DnsResolver = new SimulatedResolver() }.CheckHostAsync(IPAddress.Parse("192.0.2.1"), domain, "user@example.test");
+
+		Assert.Equal(SpfQualifier.None, result.Result);
+	}
+
+	[Theory]
+	[InlineData("user@example.test", "one", "one")]
+	[InlineData("user@example.test", "one|two", "")]
+	[InlineData("user@example.test", "ü", "")]
+	[InlineData("jörg@example.test", "%{s}", "")]
+	[InlineData("jörg@example.test", "%{S}", "j%C3%B6rg%40example.test")]
+	public async Task Explanation_IsASingleAsciiText(string sender, string texts, string expected)
+	{
+		// RFC 7208 section 6.2
+		var resolver = new SimulatedResolver().Add(new TxtRecord(_domain, 60, "v=spf1 -all exp=exp.example.test"));
+		foreach (var text in texts.Split('|'))
+			resolver.Add(new TxtRecord(DomainName.Parse("exp.example.test"), 60, text));
+
+		var result = await new SpfValidator { DnsResolver = resolver }.CheckHostAsync(IPAddress.Parse("192.0.2.1"), _domain, sender, true);
+
+		Assert.Equal(SpfQualifier.Fail, result.Result);
+		Assert.Equal(expected, result.Explanation);
+	}
+
+	[Theory]
+	[InlineData("foo=bar", SpfQualifier.Pass)]
+	[InlineData("foo2=bar", SpfQualifier.Pass)]
+	[InlineData("foo-bar=x", SpfQualifier.Pass)]
+	[InlineData("foo_bar=x", SpfQualifier.Pass)]
+	[InlineData("foo.bar=x:y/24", SpfQualifier.Pass)]
+	[InlineData("foo=", SpfQualifier.Pass)]
+	[InlineData("2foo=bar", SpfQualifier.PermError)]
+	[InlineData("-foo=bar", SpfQualifier.PermError)]
+	[InlineData("=bar", SpfQualifier.PermError)]
+	[InlineData("redirect=", SpfQualifier.PermError)]
+	[InlineData("exp=", SpfQualifier.PermError)]
+	public async Task UnknownModifier_IsIgnored(string modifier, SpfQualifier expected)
+	{
+		// RFC 7208 section 6
+		var resolver = new SimulatedResolver().Add(new TxtRecord(_domain, 60, $"v=spf1 {modifier} ip4:192.0.2.1 -all"));
+
+		Assert.Equal(expected, await CheckAsync(resolver, "192.0.2.1"));
+	}
+
+	[Theory]
+	[InlineData("V=SPF1 ip4:192.0.2.1 -all")]
+	[InlineData("v=Spf1 IP4:192.0.2.1 -ALL")]
+	public async Task Record_IsCaseInsensitive(string record)
+	{
+		// RFC 7208 section 12
+		var resolver = new SimulatedResolver().Add(new TxtRecord(_domain, 60, record));
+
+		Assert.Equal(SpfQualifier.Pass, await CheckAsync(resolver, "192.0.2.1"));
+		Assert.Equal(SpfQualifier.Fail, await CheckAsync(resolver, "192.0.2.2"));
 	}
 
 	private static DnsRecordBase CreateAddressRecord(DomainName name, string address)
