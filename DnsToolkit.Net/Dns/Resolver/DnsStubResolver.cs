@@ -31,8 +31,8 @@ namespace DnsToolkit.Net.Dns
 	public class DnsStubResolver : IDnsResolver
 	{
 		private readonly DnsClient _dnsClient;
-		private DnsCache _cache = new DnsCache();
-		private volatile bool _isDisposed;
+		private readonly DnsCache _cache = new DnsCache();
+		private int _isDisposed;
 
 		/// <summary>
 		///   Provides a new instance using the local configured DNS servers
@@ -160,7 +160,7 @@ namespace DnsToolkit.Net.Dns
 		/// </summary>
 		public void ClearCache()
 		{
-			_cache = new DnsCache();
+			_cache.Clear();
 		}
 
 		void IDisposable.Dispose()
@@ -171,24 +171,17 @@ namespace DnsToolkit.Net.Dns
 
 		protected virtual void Dispose(bool isDisposing)
 		{
-			// Not by the finalizer, as the client may be finalized already. The resolver stays usable with a client, which it
-			// does not own, so also the cache is kept.
-			if (isDisposing && OwnsClient)
+			// the resolver stays usable with a client, which it does not own, so also the cache is kept
+			if (isDisposing && OwnsClient && (Interlocked.Exchange(ref _isDisposed, 1) == 0))
 			{
-				_isDisposed = true;
-				((IDisposable) _dnsClient).Dispose();
+				new IDisposable[] { _dnsClient, _cache }.DisposeAll();
 			}
 		}
 
 		private void ThrowIfDisposed()
 		{
-			if (_isDisposed)
+			if (Volatile.Read(ref _isDisposed) != 0)
 				throw new ObjectDisposedException(GetType().FullName);
-		}
-
-		~DnsStubResolver()
-		{
-			Dispose(false);
 		}
 	}
 }

@@ -37,10 +37,11 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 		public readonly ResolveLoopProtector LoopProtector = new();
 	}
 
-	private DnsCache _cache = new();
+	private readonly DnsCache _cache = new();
 	private readonly DnsSecValidator<ResolveContext> _validator;
-	private NameserverCache _nameserverCache = new();
+	private readonly NameserverCache _nameserverCache = new();
 	private readonly IClientTransport[] _transports;
+	private int _isDisposed;
 
 	private readonly IResolverHintStore _resolverHintStore;
 
@@ -97,8 +98,8 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 	/// </summary>
 	public void ClearCache()
 	{
-		_cache = new DnsCache();
-		_nameserverCache = new NameserverCache();
+		_cache.Clear();
+		_nameserverCache.Clear();
 	}
 
 	/// <summary>
@@ -402,18 +403,9 @@ public class DnsSecRecursiveDnsResolver : IDnsSecResolver, IInternalDnsSecResolv
 
 	protected virtual void Dispose(bool isDisposing)
 	{
-		// not by the finalizer, as the transports may be finalized already
-		if (!isDisposing)
+		if (!isDisposing || (Interlocked.Exchange(ref _isDisposed, 1) != 0))
 			return;
 
-		foreach (var transport in _transports)
-		{
-			transport.Dispose();
-		}
-	}
-
-	~DnsSecRecursiveDnsResolver()
-	{
-		Dispose(false);
+		_transports.DisposeAll();
 	}
 }

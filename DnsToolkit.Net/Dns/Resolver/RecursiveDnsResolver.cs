@@ -37,9 +37,10 @@ namespace DnsToolkit.Net.Dns
 			public readonly ResolveLoopProtector LoopProtector = new();
 		}
 
-		private DnsCache _cache = new DnsCache();
-		private NameserverCache _nameserverCache = new NameserverCache();
+		private readonly DnsCache _cache = new DnsCache();
+		private readonly NameserverCache _nameserverCache = new NameserverCache();
 		private readonly IClientTransport[] _transports;
+		private int _isDisposed;
 
 		private readonly IResolverHintStore _resolverHintStore;
 
@@ -95,8 +96,8 @@ namespace DnsToolkit.Net.Dns
 		/// </summary>
 		public void ClearCache()
 		{
-			_cache = new DnsCache();
-			_nameserverCache = new NameserverCache();
+			_cache.Clear();
+			_nameserverCache.Clear();
 		}
 
 		/// <summary>
@@ -335,19 +336,10 @@ namespace DnsToolkit.Net.Dns
 
 		protected virtual void Dispose(bool isDisposing)
 		{
-			// not by the finalizer, as the transports may be finalized already
-			if (!isDisposing)
+			if (!isDisposing || (Interlocked.Exchange(ref _isDisposed, 1) != 0))
 				return;
 
-			foreach (var transport in _transports)
-			{
-				transport.Dispose();
-			}
-		}
-
-		~RecursiveDnsResolver()
-		{
-			Dispose(false);
+			_transports.DisposeAll();
 		}
 	}
 }

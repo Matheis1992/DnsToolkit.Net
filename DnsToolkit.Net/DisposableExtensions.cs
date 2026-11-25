@@ -17,6 +17,8 @@
 // limitations under the License.
 #endregion
 
+using System.Runtime.ExceptionServices;
+
 namespace DnsToolkit.Net;
 
 internal static class DisposableExtensions
@@ -32,5 +34,27 @@ internal static class DisposableExtensions
 		{
 			return false;
 		}
+	}
+
+	/// <summary>
+	///   Disposes all objects, also if disposing one throws an exception. The first exception is rethrown.
+	/// </summary>
+	public static void DisposeAll(this IEnumerable<IDisposable> disposables)
+	{
+		ExceptionDispatchInfo? firstException = null;
+
+		foreach (var disposable in disposables)
+		{
+			try
+			{
+				disposable.Dispose();
+			}
+			catch (Exception e)
+			{
+				firstException ??= ExceptionDispatchInfo.Capture(e);
+			}
+		}
+
+		firstException?.Throw();
 	}
 }

@@ -80,6 +80,17 @@ namespace DnsToolkit.Net.Dns
 		/// </summary>
 		internal int Count => _cache.Count;
 
+		/// <summary>
+		///   Removes all zones
+		/// </summary>
+		public void Clear()
+		{
+			lock (_addLock)
+			{
+				_cache.Clear();
+			}
+		}
+
 		public void Add(DomainName zoneName, IPAddress address, int timeToLive)
 		{
 			var utcNow = _clock.UtcNow.UtcDateTime;
