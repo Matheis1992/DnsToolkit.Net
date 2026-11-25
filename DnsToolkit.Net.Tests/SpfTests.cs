@@ -831,6 +831,28 @@ public class SpfTests
 	}
 
 	[Theory]
+	[InlineData("%{l}", @"x\@example.test", @"x\\._spf.example.test", SpfQualifier.Pass)]
+	[InlineData("%{l}", @"x\@example.test", @"x\._spf.example.test", SpfQualifier.Fail)]
+	[InlineData("%{l}", @"\120@example.test", @"\\120._spf.example.test", SpfQualifier.Pass)]
+	[InlineData("%{l}", @"\120@example.test", "x._spf.example.test", SpfQualifier.Fail)]
+	[InlineData("%{l}", "\"a.b\"@example.test", "\\\"a.b\\\"._spf.example.test", SpfQualifier.Pass)]
+	[InlineData("%{l}", "\"a.b\"@example.test", "\"a.b\"._spf.example.test", SpfQualifier.Fail)]
+	[InlineData("%{l}", "x\"@example.test", "x\\\"._spf.example.test", SpfQualifier.Pass)]
+	[InlineData("%{l1r-}", @"x\-y@example.test", @"x\\._spf.example.test", SpfQualifier.Pass)]
+	[InlineData("%{L}", @"x\@example.test", "x%5C._spf.example.test", SpfQualifier.Pass)]
+	[InlineData("%{s}", @"x\@example.test", @"x\\@example.test._spf.example.test", SpfQualifier.Pass)]
+	[InlineData("%{o}", @"user@x\", @"x\\._spf.example.test", SpfQualifier.Pass)]
+	public async Task EscapesOfTheSender_DoNotChangeTheLabels(string macro, string sender, string name, SpfQualifier expected)
+	{
+		// the sender must not join or decode labels of the queried name
+		var resolver = new SimulatedResolver()
+			.Add(new TxtRecord(_domain, 60, $"v=spf1 exists:{macro}._spf.example.test -all"))
+			.Add(new ARecord(DomainName.Parse(name), 60, IPAddress.Parse("127.0.0.2")));
+
+		Assert.Equal(expected, await CheckAsync(new SpfValidator { DnsResolver = resolver }, "192.0.2.1", sender));
+	}
+
+	[Theory]
 	[InlineData("exists:%{l/}.e.test/24")]
 	[InlineData("exists:%%{l/}.e.test")]
 	public async Task SlashOutsideOfAMacro_StartsThePrefixLength(string term)
@@ -896,6 +918,18 @@ public class SpfTests
 	[InlineData("user@example.test", "ü", "")]
 	[InlineData("jörg@example.test", "%{s}", "")]
 	[InlineData("jörg@example.test", "%{S}", "j%C3%B6rg%40example.test")]
+	[InlineData("jörg@bücher.test", "%{o}", "xn--bcher-kva.test")]
+	[InlineData("user@bücher.test", "Mail from %{o} rejected", "Mail from xn--bcher-kva.test rejected")]
+	[InlineData("user@bücher.test", "%{s}", "user@xn--bcher-kva.test")]
+	[InlineData("user@bücher.test", "%{o1r}", "xn--bcher-kva")]
+	[InlineData("user@example.test", " ~", " ~")]
+	[InlineData("user@example.test", "Denied\r\n250 OK", "")]
+	[InlineData("user@example.test", "a\tb", "")]
+	[InlineData("user@example.test", "a\0b", "")]
+	[InlineData("user@example.test", "a\x7f", "")]
+	[InlineData("a\r\nb@example.test", "Denied %{l}", "")]
+	[InlineData("a\r\nb@example.test", "Denied %{L}", "Denied a%0D%0Ab")]
+	[InlineData(@"x\@example.test", "%{l}", @"x\")]
 	public async Task Explanation_IsASingleAsciiText(string sender, string texts, string expected)
 	{
 		// RFC 7208 section 6.2

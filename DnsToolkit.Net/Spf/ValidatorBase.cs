@@ -304,11 +304,12 @@ namespace DnsToolkit.Net.Spf
 							DnsResolveResult<TxtRecord> dnsResult = await ResolveDnsAsync<TxtRecord>(target, RecordType.Txt, token).ConfigureAwait(false);
 							if ((dnsResult != null) && (dnsResult.ReturnCode == ReturnCode.NoError))
 							{
-								// more than one record or a text, which is not ASCII or has a syntax error, gives no explanation (RFC 7208, section 6.2)
+								// more than one record or a text, which is not printable ASCII or has a syntax error, gives no explanation (RFC 7208, section 6.2).
+								// Control characters would allow the domain owner or the sender to inject lines, e.g. into an SMTP reply.
 								if (dnsResult.Records?.Count == 1)
 								{
 									string? explanation = (await ExpandMacroAsync(dnsResult.Records[0].TextData, ip, domain, sender, state, MacroTarget.ExplanationText, token).ConfigureAwait(false)).Text;
-									result.Explanation = (explanation != null) && explanation.All(c => c <= 127) ? explanation : String.Empty;
+									result.Explanation = (explanation != null) && explanation.All(c => (c >= ' ') && (c <= '~')) ? explanation : String.Empty;
 								}
 								else
 								{
@@ -758,7 +759,7 @@ namespace DnsToolkit.Net.Spf
 							if ((target != MacroTarget.ExplanationText) && !IsLocalPartAscii(sender))
 								return (null, SpfQualifier.None);
 
-							letter = (target == MacroTarget.ExplanationText) ? sender : ToALabels(sender);
+							letter = ToALabels(sender);
 							break;
 						case "l":
 							if ((target != MacroTarget.ExplanationText) && !IsLocalPartAscii(sender))
@@ -769,7 +770,7 @@ namespace DnsToolkit.Net.Spf
 							break;
 						case "o":
 							// no boundary check needed, sender is validated on start of CheckHost
-							string convertedSender = (target == MacroTarget.ExplanationText) ? sender : ToALabels(sender);
+							string convertedSender = ToALabels(sender);
 							letter = convertedSender.Substring(convertedSender.LastIndexOf('@') + 1);
 							break;
 						case "d":
@@ -816,9 +817,12 @@ namespace DnsToolkit.Net.Spf
 
 					bool isEscaped = Char.IsUpper(macro[0]);
 
+					// the other macros are not free text, names are already escaped
+					bool isLiteralName = (target != MacroTarget.ExplanationText) && ("slo".IndexOf(Char.ToLowerInvariant(macro[0])) >= 0);
+
 					// only letter
 					if (pattern.Value.Length == 4)
-						return (isEscaped ? EscapeUrl(letter) : letter, SpfQualifier.None);
+						return (Escape(letter), SpfQualifier.None);
 
 					char[] delimiters = pattern.Groups["delimiter"].Value.ToCharArray();
 					if (delimiters.Length == 0)
@@ -842,7 +846,15 @@ namespace DnsToolkit.Net.Spf
 					count = Math.Min(count, parts.Length);
 
 					string joined = String.Join(".", parts, (parts.Length - count), count);
-					return (isEscaped ? EscapeUrl(joined) : joined, SpfQualifier.None);
+					return (Escape(joined), SpfQualifier.None);
+
+					string Escape(string s)
+					{
+						if (isEscaped)
+							s = EscapeUrl(s);
+
+						return isLiteralName ? EscapeName(s) : s;
+					}
 			}
 		}
 
@@ -880,6 +892,12 @@ namespace DnsToolkit.Net.Spf
 			}
 
 			return sb.ToString();
+		}
+
+		// the sender must not escape or quote the dots of a name, as this changes its labels
+		private static string EscapeName(string s)
+		{
+			return s.Replace("\\", "\\\\").Replace("\"", "\\\"");
 		}
 
 		// terms with a local part, which is not ASCII, do not match (RFC 8616, section 4)
