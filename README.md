@@ -21,6 +21,7 @@ The library is available on Nuget: [https://www.nuget.org/packages/DnsToolkit.Ne
 * RFC 4406 - Sender ID: Authenticating E-Mail
 * RFC 4408 - Sender Policy Framework (SPF)
 * RFC 7208 - Sender Policy Framework (SPF) for Authorizing Use of Domains in Email, Version 1
+* RFC 8616 - Email Authentication for Internationalized Mail (SPF macros only)
 
 **Encoding and Decoding:**
 * RFC 4648 - The Base16, Base32, and Base64 Data Encodings
