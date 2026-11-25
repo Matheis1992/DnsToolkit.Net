@@ -55,6 +55,7 @@ namespace DnsToolkit.Net.Dns
 
 		private readonly IClientTransport[] _transports;
 		private readonly bool _disposeTransports;
+		private int _isDisposed;
 
 		internal DnsClientBase(IEnumerable<IPAddress> servers, int queryTimeout, IClientTransport[] transports, bool disposeTransports)
 		{
@@ -529,19 +530,10 @@ namespace DnsToolkit.Net.Dns
 
 		protected virtual void Dispose(bool isDisposing)
 		{
-			// not by the finalizer, as the transports may still be used by others or be finalized already
-			if (isDisposing && _disposeTransports)
+			if (isDisposing && _disposeTransports && (Interlocked.Exchange(ref _isDisposed, 1) == 0))
 			{
-				foreach (var transport in _transports)
-				{
-					transport.Dispose();
-				}
+				_transports.DisposeAll();
 			}
-		}
-
-		~DnsClientBase()
-		{
-			Dispose(false);
 		}
 	}
 }

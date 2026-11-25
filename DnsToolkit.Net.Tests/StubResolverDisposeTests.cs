@@ -17,6 +17,7 @@
 #endregion
 
 using System.Net;
+using System.Reflection;
 using DnsToolkit.Net.Dns;
 
 namespace DnsToolkit.Net.Tests;
@@ -46,12 +47,102 @@ public class StubResolverDisposeTests
 	[Theory]
 	[InlineData(false)]
 	[InlineData(true)]
-	public void Dispose_Twice_DoesNotThrow(bool isDnsSec)
+	public void Dispose_Repeatedly_DisposesAnOwnedClientOnce(bool isDnsSec)
 	{
-		var resolver = CreateResolver(isDnsSec, CreateClient(new DisposeCountingTransport()), ownsClient: true);
+		var transport = new DisposeCountingTransport();
+		var resolver = CreateResolver(isDnsSec, CreateClient(transport), ownsClient: true);
 
 		resolver.Dispose();
 		resolver.Dispose();
+		Parallel.For(0, 20, _ => resolver.Dispose());
+
+		Assert.Equal(1, transport.DisposeCount);
+	}
+
+	[Theory]
+	[InlineData(false)]
+	[InlineData(true)]
+	public void Dispose_DisposesTheCacheOnlyWithAnOwnedClient(bool isDnsSec)
+	{
+		using var client = CreateClient(new DisposeCountingTransport());
+		var owner = CreateResolver(isDnsSec, CreateClient(new DisposeCountingTransport()), ownsClient: true);
+		var other = CreateResolver(isDnsSec, client, ownsClient: false);
+
+		owner.Dispose();
+		other.Dispose();
+
+		Assert.True(GetCache(owner).IsDisposed);
+		Assert.False(GetCache(other).IsDisposed);
+
+		// does nothing on the disposed cache
+		owner.ClearCache();
+		other.ClearCache();
+	}
+
+	[Theory]
+	[InlineData("stub")]
+	[InlineData("selfvalidating")]
+	[InlineData("recursive")]
+	[InlineData("dnssec")]
+	public void ClearCache_ClearsTheExistingCache(string type)
+	{
+		using IDnsResolver resolver = type switch
+		{
+			"stub" => new DnsStubResolver(_servers),
+			"selfvalidating" => new SelfValidatingInternalDnsSecStubResolver(_servers),
+			"recursive" => new RecursiveDnsResolver(),
+			_ => new DnsSecRecursiveDnsResolver(),
+		};
+		var cache = GetCache(resolver);
+		cache.Add(_name, RecordType.A, RecordClass.INet, new[] { new ARecord(_name, 3600, IPAddress.Parse("192.0.2.1")) }, DnsSecValidationResult.Indeterminate, 3600);
+
+		resolver.ClearCache();
+
+		Assert.Same(cache, GetCache(resolver));
+		Assert.Equal(0, cache.Count);
+	}
+
+	[Fact]
+	public async Task ClearCache_LetsAnswersBeFetchedAgain()
+	{
+		using var server = new LocalDnsServer(new[] { new ARecord(_name, 3600, IPAddress.Parse("192.0.2.1")) });
+		using IDnsResolver resolver = new DnsStubResolver(server.CreateClient(new TcpClientTransport(server.Port)), true);
+
+		Assert.Single(await resolver.ResolveAsync<ARecord>(_name, token: TestToken));
+		Assert.Single(await resolver.ResolveAsync<ARecord>(_name, token: TestToken));
+		Assert.Equal(1, server.QueryCount);
+
+		resolver.ClearCache();
+
+		Assert.Single(await resolver.ResolveAsync<ARecord>(_name, token: TestToken));
+		Assert.Single(await resolver.ResolveAsync<ARecord>(_name, token: TestToken));
+		Assert.Equal(2, server.QueryCount);
+	}
+
+	[Fact]
+	public async Task ClearCache_WhileQueriesRun_DoesNotThrow()
+	{
+		using var server = new LocalDnsServer(new[] { new ARecord(_name, 3600, IPAddress.Parse("192.0.2.1")) });
+		using IDnsResolver resolver = new DnsStubResolver(server.CreateClient(new TcpClientTransport(server.Port)), true);
+
+		var queries = Enumerable.Range(0, 8).Select(_ => Task.Run(async () =>
+		{
+			for (var i = 0; i < 50; i++)
+				Assert.Single(await resolver.ResolveAsync<ARecord>(_name, token: TestToken));
+		}, TestToken)).ToArray();
+
+		while (!queries.All(q => q.IsCompleted))
+		{
+			resolver.ClearCache();
+			await Task.Delay(1, TestToken);
+		}
+
+		await Task.WhenAll(queries);
+	}
+
+	private static DnsCache GetCache(IDnsResolver resolver)
+	{
+		return (DnsCache) resolver.GetType().GetField("_cache", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(resolver)!;
 	}
 
 	[Theory]

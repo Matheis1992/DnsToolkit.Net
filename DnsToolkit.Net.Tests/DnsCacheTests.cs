@@ -308,6 +308,55 @@ public class DnsCacheTests
 		Assert.False(cache.TryGetAddresses(zone, out _), "The zone is returned after the time to live of its last address");
 	}
 
+	[Fact]
+	public void Clear_RemovesAllEntries()
+	{
+		// an entry with one record fills the cache
+		var cache = new DnsCache(2, _scanFrequency);
+		cache.Add(_name, RecordType.A, RecordClass.INet, Records(_name, "192.0.2.1"), 3600);
+
+		cache.Clear();
+
+		Assert.Equal(0, cache.Count);
+		Assert.False(cache.TryGetRecords<ARecord>(_name, RecordType.A, RecordClass.INet, out List<ARecord>? _));
+
+		// also the size is reset
+		cache.Add(Name(1), RecordType.A, RecordClass.INet, Records(Name(1), "192.0.2.1"), 3600);
+		Assert.True(cache.TryGetRecords<ARecord>(Name(1), RecordType.A, RecordClass.INet, out List<ARecord>? _));
+	}
+
+	[Fact]
+	public void Nameserver_Clear_RemovesAllZones()
+	{
+		var cache = new NameserverCache(1, _scanFrequency);
+		cache.Add(Zone(1), IPAddress.Parse("192.0.2.1"), 3600);
+
+		cache.Clear();
+
+		Assert.Equal(0, cache.Count);
+		Assert.False(cache.TryGetAddresses(Zone(1), out _));
+
+		cache.Add(Zone(2), IPAddress.Parse("192.0.2.1"), 3600);
+		Assert.True(cache.TryGetAddresses(Zone(2), out _));
+	}
+
+	[Fact]
+	public void DisposedCache_IsEmptyAndDoesNotThrow()
+	{
+		// e.g. of a query, which ends after its resolver was disposed
+		var cache = new DnsCache();
+		cache.Add(_name, RecordType.A, RecordClass.INet, Records(_name, "192.0.2.1"), 3600);
+
+		cache.Dispose();
+		cache.Dispose();
+
+		Assert.False(cache.TryGetRecords<ARecord>(_name, RecordType.A, RecordClass.INet, out List<ARecord>? _));
+		cache.Add(_name, RecordType.A, RecordClass.INet, Records(_name, "192.0.2.1"), 3600);
+		cache.Add(_name, RecordType.A, RecordClass.INet, Records(_name, "192.0.2.1"), 0);
+		cache.Clear();
+		Assert.False(cache.TryGetRecords<ARecord>(_name, RecordType.A, RecordClass.INet, out List<ARecord>? _));
+	}
+
 	private static DomainName Name(int i) => DomainName.Parse($"host{i}.example.test");
 
 	private static DomainName Zone(int i) => DomainName.Parse($"zone{i}.example.test");

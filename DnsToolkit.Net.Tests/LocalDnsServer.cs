@@ -33,6 +33,10 @@ internal sealed class LocalDnsServer : IDisposable
 	private readonly List<DnsRecordBase> _records;
 	private readonly TimeSpan _answerDelay;
 
+	private int _queryCount;
+
+	public int QueryCount => Volatile.Read(ref _queryCount);
+
 	public int Port { get; private set; }
 	public int TlsPort { get; private set; }
 	// generating a RSA key is expensive, so all servers share one certificate
@@ -76,6 +80,8 @@ internal sealed class LocalDnsServer : IDisposable
 
 	private async Task AnswerQuery(object sender, QueryReceivedEventArgs e)
 	{
+		Interlocked.Increment(ref _queryCount);
+
 		// like a handler, which waits for an upstream server
 		if (_answerDelay > TimeSpan.Zero)
 			await Task.Delay(_answerDelay);

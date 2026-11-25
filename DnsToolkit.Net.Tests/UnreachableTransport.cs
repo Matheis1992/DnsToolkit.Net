@@ -45,5 +45,16 @@ internal sealed class UnreachableTransport : IClientTransport
 	public Task<IClientConnection?> GetPooledConnectionAsync(DnsClientEndpointInfo endpointInfo, CancellationToken token = default)
 		=> Task.FromResult<IClientConnection?>(null);
 
-	public void Dispose() => Interlocked.Increment(ref _disposeCount);
+	/// <summary>
+	///   The exception, which is thrown when the transport is disposed
+	/// </summary>
+	public Exception? DisposeException { get; set; }
+
+	public void Dispose()
+	{
+		Interlocked.Increment(ref _disposeCount);
+
+		if (DisposeException != null)
+			throw DisposeException;
+	}
 }
